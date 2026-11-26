@@ -268,6 +268,8 @@ struct GncPluginPageRetirementPrivate
     GtkEntry* entry_ai_model = nullptr;
     GtkEntry* entry_ai_key = nullptr;
     GtkEntry* entry_ai_question = nullptr;
+    GtkComboBoxText* combo_ai_prompt = nullptr;
+    GtkTextView* tv_ai_system = nullptr;
     GtkTextView* tv_ai_response = nullptr;
     GtkLabel* lbl_ai_status = nullptr;
     GtkWidget* btn_ai_apply = nullptr;
@@ -965,6 +967,21 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     if (priv->entry_ai_model)
         g_key_file_set_string(state, STATE_GROUP_PLAN, "ai_model",
                               gtk_entry_get_text(priv->entry_ai_model));
+    if (priv->combo_ai_prompt)
+        g_key_file_set_integer(state, STATE_GROUP_PLAN, "ai_prompt_preset",
+                               gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_prompt)));
+    if (priv->tv_ai_system)
+    {
+        GtkTextBuffer* sbuf = gtk_text_view_get_buffer(priv->tv_ai_system);
+        GtkTextIter s0, s1;
+        gtk_text_buffer_get_bounds(sbuf, &s0, &s1);
+        gchar* stxt = gtk_text_buffer_get_text(sbuf, &s0, &s1, FALSE);
+        if (stxt)
+        {
+            g_key_file_set_string(state, STATE_GROUP_PLAN, "ai_system_prompt", stxt);
+            g_free(stxt);
+        }
+    }
 
     g_key_file_remove_group(state, STATE_GROUP_ACCTS, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EXCLUDED, nullptr);
@@ -1206,6 +1223,18 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
             if (md[0] != '\0')
                 gtk_entry_set_text(priv->entry_ai_model, md);
             g_free(md);
+        }
+    }
+    if (priv->combo_ai_prompt)
+        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_prompt),
+                                 std::clamp(get_int("ai_prompt_preset", 0), 0, 4));
+    if (priv->tv_ai_system)
+    {
+        if (gchar* sp = g_key_file_get_string(state, STATE_GROUP_PLAN, "ai_system_prompt", nullptr))
+        {
+            if (sp[0] != '\0')
+                gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system), sp, -1);
+            g_free(sp);
         }
     }
 
@@ -2194,6 +2223,63 @@ on_clear_snapshot_clicked(GtkWidget*, gpointer user_data)
     populate_schedule_and_comparison(priv);
 }
 
+static const char*
+ai_preset_text(int idx)
+{
+    switch (idx)
+    {
+        case 0:
+            return
+                "You are an analytical personal financial planner. Your role is to evaluate cash flow, "
+                "retirement withdrawal strategies, tax-bracket optimization, and asset allocation using clear, objective math.\n\n"
+                "OPERATING RULES:\n"
+                "1. Show Your Math: Never state a final dollar figure, tax liability, or growth projection without showing the step-by-step formula and intermediate numbers first.\n"
+                "2. No Unverified Rates: Never guess current-year tax brackets, IRS contribution limits, IRMAA thresholds, or interest rates. State the exact baseline assumption you are using (e.g., \"Assuming a 22% marginal federal rate and 7% nominal return\") or ask the user to supply the exact table/numbers.\n"
+                "3. Missing Variables First: Before modeling a scenario, list any critical missing inputs (filing status, age, account tax treatment—Traditional vs. Roth vs. Taxable, inflation assumption, or time horizon) and state sensible defaults if proceeding.\n"
+                "4. Separate Facts from Trade-offs: Structure every response into four sections:\n"
+                "   - Assumptions & Inputs\n"
+                "   - Step-by-Step Calculation\n"
+                "   - Strategic Trade-offs & Risks (tax drag, sequence-of-returns risk, liquidity)\n"
+                "   - Next Questions to Refine\n"
+                "5. Tone & Boundaries: Be direct, concise, and quantitative. Avoid generic disclaimers or filler. Present options and trade-offs rather than single-choice guarantees.\n\n"
+                "If recommending What-If parameter changes, also append a ```json {...} ``` block using only changed keys from: "
+                "retirement_age, horizon_age, ss_claim_age, target_annual_spending, target_bequest, bridge_income_annual, "
+                "enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
+        case 1:
+            return
+                "Concise retirement advisor. Give 3-5 short quantitative bullets based on the provided plan summary. "
+                "For What-If or parameter changes, include ```json {...} ``` using only changed keys from: "
+                "retirement_age, horizon_age, ss_claim_age, target_annual_spending, target_bequest, "
+                "bridge_income_annual, enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
+        case 2:
+            return
+                "You are a retirement tax-bracket and Roth conversion strategist. Focus on marginal ordinary brackets, "
+                "RMD growth mitigation, taxable vs. tax-deferred vs. Roth sequencing, IRMAA lookback tiers, and pre-65 ACA 400% FPL cliffs. "
+                "Show exact dollar headroom and trade-offs. If suggesting parameter changes, append a ```json {...} ``` block.";
+        case 3:
+            return
+                "You are a retirement risk & sequence-of-returns auditor. Evaluate early-crash vulnerability, "
+                "1928-2024 historical cycle resilience, Monte Carlo P10/P50/P90 dispersion, Guyton-Klinger guardrails, "
+                "and equity/bond glide path trade-offs. If suggesting parameter changes, append a ```json {...} ``` block.";
+        default:
+            return "";
+    }
+}
+
+static void
+on_ai_prompt_preset_changed(GtkComboBox*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (!priv->combo_ai_prompt || !priv->tv_ai_system)
+        return;
+    int idx = gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_prompt));
+    if (idx >= 0 && idx <= 3)
+    {
+        gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system),
+                                 ai_preset_text(idx), -1);
+    }
+}
+
 static void
 set_ai_response_text(GncPluginPageRetirementPrivate* priv, const std::string& text)
 {
@@ -2641,15 +2727,25 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
         url += "/models/" + model + ":generateContent";
     }
 
-    std::string sys_prompt =
-        "Concise retirement advisor. Give 3-5 short bullets. "
-        "For What-If or parameter changes, include ```json {...} ``` using only changed keys from: "
-        "retirement_age, horizon_age, ss_claim_age, target_annual_spending, target_bequest, "
-        "bridge_income_annual, enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
+    std::string sys_prompt;
+    if (priv->tv_ai_system)
+    {
+        GtkTextBuffer* sbuf = gtk_text_view_get_buffer(priv->tv_ai_system);
+        GtkTextIter s0, s1;
+        gtk_text_buffer_get_bounds(sbuf, &s0, &s1);
+        gchar* stxt = gtk_text_buffer_get_text(sbuf, &s0, &s1, FALSE);
+        if (stxt)
+        {
+            sys_prompt = stxt;
+            g_free(stxt);
+        }
+    }
+    if (sys_prompt.empty())
+        sys_prompt = ai_preset_text(0);
     std::string full_prompt = build_ai_plan_summary(priv->last_input, priv->last_result)
                             + "\nQuestion: " + user_question;
     const bool use_stream = (provider != AiProvider::Gemini);
-    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, use_stream, 2048, 600);
+    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, use_stream, 2048, 1200);
 
     SoupMessage* msg = soup_message_new("POST", url.c_str());
     if (!msg)
@@ -3912,7 +4008,34 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_endpoint), 1, 1, 4, 1);
     gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("API Key")), 0, 2, 1, 1);
     gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_key), 1, 2, 4, 1);
+
+    priv->combo_ai_prompt = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(priv->combo_ai_prompt, _("Analytical Financial Planner (Show Math)"));
+    gtk_combo_box_text_append_text(priv->combo_ai_prompt, _("Concise Owl Advisor (Quick Bullets)"));
+    gtk_combo_box_text_append_text(priv->combo_ai_prompt, _("Roth & Tax-Bracket Strategist"));
+    gtk_combo_box_text_append_text(priv->combo_ai_prompt, _("Sequence-of-Returns & Stress Auditor"));
+    gtk_combo_box_text_append_text(priv->combo_ai_prompt, _("Custom System Prompt"));
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_prompt), 0);
+    g_signal_connect(priv->combo_ai_prompt, "changed", G_CALLBACK(on_ai_prompt_preset_changed), priv);
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Prompt Preset")), 0, 3, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->combo_ai_prompt), 1, 3, 4, 1);
     gtk_box_pack_start(GTK_BOX(tab_ai), ai_cfg, FALSE, FALSE, 0);
+
+    GtkWidget* sys_exp = gtk_expander_new(_("System Prompt (Editable — sent with every question)"));
+    gtk_expander_set_expanded(GTK_EXPANDER(sys_exp), FALSE);
+    priv->tv_ai_system = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(priv->tv_ai_system, TRUE);
+    gtk_text_view_set_wrap_mode(priv->tv_ai_system, GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(priv->tv_ai_system, 6);
+    gtk_text_view_set_right_margin(priv->tv_ai_system, 6);
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system), ai_preset_text(0), -1);
+    GtkWidget* sys_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sys_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(sys_scroll), 120);
+    gtk_container_add(GTK_CONTAINER(sys_scroll), GTK_WIDGET(priv->tv_ai_system));
+    gtk_container_add(GTK_CONTAINER(sys_exp), sys_scroll);
+    gtk_box_pack_start(GTK_BOX(tab_ai), sys_exp, FALSE, FALSE, 0);
 
     GtkWidget* ai_qbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     priv->entry_ai_question = GTK_ENTRY(gtk_entry_new());
