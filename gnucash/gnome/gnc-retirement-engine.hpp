@@ -339,16 +339,18 @@ USState state_from_code(const std::string& code) noexcept;
 TaxBucket bucket_from_label(const std::string& label,
                             TaxBucket fallback = TaxBucket::Taxable) noexcept;
 
-/** Serialize PlanInput and optional account bucket overrides to an INI-format string. */
+/** Serialize PlanInput, optional account bucket overrides, and excluded accounts to an INI-format string. */
 std::string serialize_plan_ini(
     const PlanInput& input,
-    const std::vector<std::pair<std::string, TaxBucket>>& account_overrides = {});
+    const std::vector<std::pair<std::string, TaxBucket>>& account_overrides = {},
+    const std::vector<std::string>& excluded_accounts = {});
 
-/** Deserialize PlanInput and account bucket overrides from an INI-format string. */
+/** Deserialize PlanInput, account bucket overrides, and optional excluded accounts from an INI-format string. */
 bool deserialize_plan_ini(
     const std::string& ini_text,
     PlanInput& out_input,
-    std::vector<std::pair<std::string, TaxBucket>>& out_overrides);
+    std::vector<std::pair<std::string, TaxBucket>>& out_overrides,
+    std::vector<std::string>* out_excluded = nullptr);
 
 /** Export the year-by-year projection schedule to RFC-4180 CSV text. */
 std::string export_schedule_csv(const PlanInput& input,

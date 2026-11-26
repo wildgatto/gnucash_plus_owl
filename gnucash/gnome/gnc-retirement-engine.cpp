@@ -1254,7 +1254,8 @@ bool parse_bool(const std::string& v, bool fallback)
 
 std::string serialize_plan_ini(
     const PlanInput& input,
-    const std::vector<std::pair<std::string, TaxBucket>>& account_overrides)
+    const std::vector<std::pair<std::string, TaxBucket>>& account_overrides,
+    const std::vector<std::string>& excluded_accounts)
 {
     std::ostringstream oss;
     oss.imbue(std::locale::classic());
@@ -1330,16 +1331,24 @@ std::string serialize_plan_ini(
         for (const auto& kv : account_overrides)
             oss << kv.first << "=" << bucket_label(kv.second) << "\n";
     }
+    if (!excluded_accounts.empty())
+    {
+        oss << "\n[AccountExcluded]\n";
+        for (const auto& name : excluded_accounts)
+            oss << name << "=true\n";
+    }
     return oss.str();
 }
 
 bool deserialize_plan_ini(
     const std::string& ini_text,
     PlanInput& out_input,
-    std::vector<std::pair<std::string, TaxBucket>>& out_overrides)
+    std::vector<std::pair<std::string, TaxBucket>>& out_overrides,
+    std::vector<std::string>* out_excluded)
 {
     PlanInput in = out_input;
     std::vector<std::pair<std::string, TaxBucket>> overrides;
+    std::vector<std::string> excluded;
     std::istringstream iss(ini_text);
     iss.imbue(std::locale::classic());
 
@@ -1368,6 +1377,13 @@ bool deserialize_plan_ini(
         {
             if (!key.empty())
                 overrides.emplace_back(key, bucket_from_label(val));
+            continue;
+        }
+
+        if (section == "accountexcluded")
+        {
+            if (!key.empty() && parse_bool(val, false))
+                excluded.push_back(key);
             continue;
         }
 
@@ -1468,7 +1484,7 @@ bool deserialize_plan_ini(
         }
     }
 
-    if (!saw_plan_key && overrides.empty())
+    if (!saw_plan_key && overrides.empty() && excluded.empty())
         return false;
 
     in.retirement_age = std::max(in.current_age, in.retirement_age);
@@ -1477,6 +1493,8 @@ bool deserialize_plan_ini(
     in.spouse_horizon_age = std::max(in.spouse_retirement_age + 1, in.spouse_horizon_age);
     out_input = in;
     out_overrides = std::move(overrides);
+    if (out_excluded)
+        *out_excluded = std::move(excluded);
     return true;
 }
 

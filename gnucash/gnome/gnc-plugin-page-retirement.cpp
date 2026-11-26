@@ -235,6 +235,7 @@ G_DEFINE_TYPE_WITH_PRIVATE(GncPluginPageRetirement, gnc_plugin_page_retirement, 
 static void gnc_plugin_page_retirement_finalize(GObject* object);
 static GtkWidget* gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page);
 static void gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page);
+static void gnc_plugin_page_retirement_save_page(GncPluginPage* plugin_page, GKeyFile* key_file, const gchar* group_name);
 
 static void refresh_accounts_from_book(GncPluginPageRetirementPrivate* priv);
 static void populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv);
@@ -260,6 +261,7 @@ gnc_plugin_page_retirement_class_init(GncPluginPageRetirementClass* klass)
     gnc_plugin_class->plugin_name = GNC_PLUGIN_PAGE_RETIREMENT_NAME;
     gnc_plugin_class->create_widget = gnc_plugin_page_retirement_create_widget;
     gnc_plugin_class->destroy_widget = gnc_plugin_page_retirement_destroy_widget;
+    gnc_plugin_class->save_page = gnc_plugin_page_retirement_save_page;
 }
 
 static void
@@ -666,15 +668,26 @@ collect_account_overrides(const GncPluginPageRetirementPrivate* priv)
     std::vector<std::pair<std::string, TaxBucket>> out;
     out.reserve(priv->accounts.size());
     for (const auto& a : priv->accounts)
-        out.emplace_back(a.full_name, a.included ? a.bucket : TaxBucket::Excluded);
+        out.emplace_back(a.full_name, a.bucket);
+    return out;
+}
+
+static std::vector<std::string>
+collect_excluded_accounts(const GncPluginPageRetirementPrivate* priv)
+{
+    std::vector<std::string> out;
+    for (const auto& a : priv->accounts)
+        if (!a.included)
+            out.push_back(a.full_name);
     return out;
 }
 
 static void
 apply_account_overrides_to_ui(GncPluginPageRetirementPrivate* priv,
-                              const std::vector<std::pair<std::string, TaxBucket>>& overrides)
+                              const std::vector<std::pair<std::string, TaxBucket>>& overrides,
+                              const std::vector<std::string>& excluded = {})
 {
-    if (overrides.empty())
+    if (overrides.empty() && excluded.empty())
         return;
     for (auto& a : priv->accounts)
     {
@@ -684,6 +697,14 @@ apply_account_overrides_to_ui(GncPluginPageRetirementPrivate* priv,
             {
                 a.bucket = kv.second;
                 a.included = (kv.second != TaxBucket::Excluded);
+                break;
+            }
+        }
+        for (const auto& ex : excluded)
+        {
+            if (a.full_name == ex)
+            {
+                a.included = false;
                 break;
             }
         }
@@ -1536,6 +1557,7 @@ on_refresh_accounts_clicked(GtkButton*, gpointer user_data)
         }
     }
     sync_acct_store_from_accounts(priv);
+    save_state_to_book(priv);
     run_planner(priv);
 }
 
@@ -1615,7 +1637,8 @@ on_save_plan_clicked(GtkWidget*, gpointer user_data)
     {
         gchar* filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
         std::string ini = serialize_plan_ini(read_plan_input_from_ui(priv),
-                                             collect_account_overrides(priv));
+                                             collect_account_overrides(priv),
+                                             collect_excluded_accounts(priv));
         GError* err = nullptr;
         if (!g_file_set_contents(filename, ini.c_str(), static_cast<gssize>(ini.size()), &err))
         {
@@ -1654,10 +1677,12 @@ on_load_plan_clicked(GtkWidget*, gpointer user_data)
         {
             PlanInput loaded = read_plan_input_from_ui(priv);
             std::vector<std::pair<std::string, TaxBucket>> overrides;
-            if (deserialize_plan_ini(std::string(contents, length), loaded, overrides))
+            std::vector<std::string> excluded;
+            if (deserialize_plan_ini(std::string(contents, length), loaded, overrides, &excluded))
             {
                 apply_plan_input_to_ui(priv, loaded);
-                apply_account_overrides_to_ui(priv, overrides);
+                apply_account_overrides_to_ui(priv, overrides, excluded);
+                save_state_to_book(priv);
                 run_planner(priv);
             }
             else
@@ -1843,6 +1868,7 @@ on_account_include_toggled(GtkCellRendererToggle*, gchar* path_str, gpointer use
                                ACCT_COL_BUCKET_ID, static_cast<int>(ma.bucket),
                                -1);
             update_bucket_summary_label(priv);
+            save_state_to_book(priv);
             run_planner(priv);
         }
     }
@@ -1877,6 +1903,7 @@ set_visible_accounts_included(GncPluginPageRetirementPrivate* priv, bool include
         } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(priv->acct_filter), &filt_iter));
     }
     update_bucket_summary_label(priv);
+    save_state_to_book(priv);
     run_planner(priv);
 }
 
@@ -1902,6 +1929,7 @@ on_auto_classify_accounts(GtkButton*, gpointer user_data)
         ma.included = (ma.bucket != TaxBucket::Excluded);
     }
     sync_acct_store_from_accounts(priv);
+    save_state_to_book(priv);
     run_planner(priv);
 }
 
@@ -1941,6 +1969,7 @@ on_bucket_edited(GtkCellRendererText*, gchar* path_str, gchar* new_text, gpointe
                            ACCT_COL_BUCKET_ID, static_cast<int>(chosen),
                            -1);
         update_bucket_summary_label(priv);
+        save_state_to_book(priv);
         run_planner(priv);
     }
     gtk_tree_path_free(filt_path);
@@ -2523,6 +2552,14 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     load_state_from_book(priv);
     run_planner(priv);
     return priv->root_widget;
+}
+
+static void
+gnc_plugin_page_retirement_save_page(GncPluginPage* plugin_page, GKeyFile*, const gchar*)
+{
+    auto page = GNC_PLUGIN_PAGE_RETIREMENT(plugin_page);
+    auto priv = GNC_PLUGIN_PAGE_RETIREMENT_GET_PRIVATE(page);
+    save_state_to_book(priv);
 }
 
 static void

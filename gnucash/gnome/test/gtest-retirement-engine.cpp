@@ -470,3 +470,28 @@ TEST(RetirementEngine, CustomCostBasisAndPerBucketReturns)
     EXPECT_DOUBLE_EQ(rt.return_tax_free, 0.09);
     EXPECT_DOUBLE_EQ(rt.return_hsa, 0.05);
 }
+
+TEST(RetirementEngine, AccountSelectionAndBucketOverridePersistence)
+{
+    PlanInput in;
+    std::vector<std::pair<std::string, TaxBucket>> overrides = {
+        {"Assets:Brokerage", TaxBucket::Taxable},
+        {"Assets:Retirement:401k", TaxBucket::TaxDeferred},
+        {"Assets:Checking", TaxBucket::Taxable}
+    };
+    std::vector<std::string> excluded = {"Assets:Checking"};
+
+    std::string ini = serialize_plan_ini(in, overrides, excluded);
+    EXPECT_NE(ini.find("[AccountExcluded]"), std::string::npos);
+    EXPECT_NE(ini.find("Assets:Checking=true"), std::string::npos);
+
+    PlanInput rt;
+    std::vector<std::pair<std::string, TaxBucket>> rt_ov;
+    std::vector<std::string> rt_ex;
+    ASSERT_TRUE(deserialize_plan_ini(ini, rt, rt_ov, &rt_ex));
+    ASSERT_EQ(rt_ov.size(), 3u);
+    EXPECT_EQ(rt_ov[2].first, "Assets:Checking");
+    EXPECT_EQ(rt_ov[2].second, TaxBucket::Taxable); // underlying bucket preserved
+    ASSERT_EQ(rt_ex.size(), 1u);
+    EXPECT_EQ(rt_ex[0], "Assets:Checking");
+}
