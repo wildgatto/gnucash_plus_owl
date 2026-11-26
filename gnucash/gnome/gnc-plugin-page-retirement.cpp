@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -56,6 +57,7 @@ struct MappedAccount
     std::string full_name;
     double balance = 0.0;
     TaxBucket bucket = TaxBucket::Taxable;
+    bool included = true;
 };
 
 enum class ChartMode
@@ -86,10 +88,12 @@ enum
 
 enum
 {
-    ACCT_COL_NAME = 0,
+    ACCT_COL_INCLUDE = 0,
+    ACCT_COL_NAME,
     ACCT_COL_BAL,
     ACCT_COL_BUCKET_STR,
     ACCT_COL_BUCKET_ID,
+    ACCT_COL_ORIG_IDX,
     NUM_ACCT_COLS
 };
 
@@ -194,6 +198,9 @@ struct GncPluginPageRetirementPrivate
     GtkListStore* sched_store = nullptr;
     GtkListStore* cmp_store = nullptr;
     GtkListStore* acct_store = nullptr;
+    GtkTreeModelFilter* acct_filter = nullptr;
+    GtkSearchEntry* entry_acct_filter = nullptr;
+    GtkLabel* lbl_acct_count = nullptr;
 
     std::vector<MappedAccount> accounts;
     PlanInput last_input;
@@ -263,7 +270,7 @@ compute_buckets_from_accounts(const std::vector<MappedAccount>& accounts)
     AccountBuckets b;
     for (const auto& a : accounts)
     {
-        if (a.balance <= 0.0)
+        if (!a.included || a.balance <= 0.0)
             continue;
         switch (a.bucket)
         {
@@ -298,6 +305,17 @@ update_bucket_summary_label(GncPluginPageRetirementPrivate* priv)
         + "  •  HSA " + fmt_currency(b.hsa)
         + "  •  <b>Total " + fmt_currency(b.total()) + "</b>";
     gtk_label_set_markup(priv->lbl_bucket_summary, txt.c_str());
+
+    if (priv->lbl_acct_count)
+    {
+        size_t inc = 0;
+        for (const auto& a : priv->accounts)
+            if (a.included && a.bucket != TaxBucket::Excluded)
+                ++inc;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%zu / %zu included", inc, priv->accounts.size());
+        gtk_label_set_text(priv->lbl_acct_count, buf);
+    }
 }
 
 static void
@@ -325,9 +343,32 @@ collect_account_cb(Account* acct, gpointer user_data)
     ma.full_name = full ? full : "";
     ma.balance = d_bal;
     ma.bucket = classify_account_name(ma.full_name, desc ? desc : "");
+    ma.included = (ma.bucket != TaxBucket::Excluded);
     g_free(full);
 
     list->push_back(std::move(ma));
+}
+
+static void
+sync_acct_store_from_accounts(GncPluginPageRetirementPrivate* priv)
+{
+    gtk_list_store_clear(priv->acct_store);
+    for (size_t i = 0; i < priv->accounts.size(); ++i)
+    {
+        const auto& ma = priv->accounts[i];
+        GtkTreeIter iter;
+        gtk_list_store_append(priv->acct_store, &iter);
+        std::string bal_str = fmt_table_dollar(ma.balance);
+        gtk_list_store_set(priv->acct_store, &iter,
+                           ACCT_COL_INCLUDE, ma.included ? TRUE : FALSE,
+                           ACCT_COL_NAME, ma.full_name.c_str(),
+                           ACCT_COL_BAL, bal_str.c_str(),
+                           ACCT_COL_BUCKET_STR, bucket_label(ma.bucket),
+                           ACCT_COL_BUCKET_ID, static_cast<int>(ma.bucket),
+                           ACCT_COL_ORIG_IDX, static_cast<int>(i),
+                           -1);
+    }
+    update_bucket_summary_label(priv);
 }
 
 static void
@@ -341,21 +382,7 @@ refresh_accounts_from_book(GncPluginPageRetirementPrivate* priv)
         if (root)
             gnc_account_foreach_descendant(root, collect_account_cb, &priv->accounts);
     }
-
-    gtk_list_store_clear(priv->acct_store);
-    for (const auto& ma : priv->accounts)
-    {
-        GtkTreeIter iter;
-        gtk_list_store_append(priv->acct_store, &iter);
-        std::string bal_str = fmt_table_dollar(ma.balance);
-        gtk_list_store_set(priv->acct_store, &iter,
-                           ACCT_COL_NAME, ma.full_name.c_str(),
-                           ACCT_COL_BAL, bal_str.c_str(),
-                           ACCT_COL_BUCKET_STR, bucket_label(ma.bucket),
-                           ACCT_COL_BUCKET_ID, static_cast<int>(ma.bucket),
-                           -1);
-    }
-    update_bucket_summary_label(priv);
+    sync_acct_store_from_accounts(priv);
 }
 
 static void
@@ -573,7 +600,7 @@ collect_account_overrides(const GncPluginPageRetirementPrivate* priv)
     std::vector<std::pair<std::string, TaxBucket>> out;
     out.reserve(priv->accounts.size());
     for (const auto& a : priv->accounts)
-        out.emplace_back(a.full_name, a.bucket);
+        out.emplace_back(a.full_name, a.included ? a.bucket : TaxBucket::Excluded);
     return out;
 }
 
@@ -590,32 +617,17 @@ apply_account_overrides_to_ui(GncPluginPageRetirementPrivate* priv,
             if (a.full_name == kv.first)
             {
                 a.bucket = kv.second;
+                a.included = (kv.second != TaxBucket::Excluded);
                 break;
             }
         }
     }
-    GtkTreeIter iter;
-    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(priv->acct_store), &iter))
-    {
-        size_t idx = 0;
-        do
-        {
-            if (idx < priv->accounts.size())
-            {
-                TaxBucket b = priv->accounts[idx].bucket;
-                gtk_list_store_set(priv->acct_store, &iter,
-                                   ACCT_COL_BUCKET_STR, bucket_label(b),
-                                   ACCT_COL_BUCKET_ID, static_cast<int>(b),
-                                   -1);
-            }
-            ++idx;
-        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(priv->acct_store), &iter));
-    }
-    update_bucket_summary_label(priv);
+    sync_acct_store_from_accounts(priv);
 }
 
 static constexpr const char* STATE_GROUP_PLAN = "RetirementPlanner";
 static constexpr const char* STATE_GROUP_ACCTS = "RetirementPlannerAccounts";
+static constexpr const char* STATE_GROUP_EXCLUDED = "RetirementPlannerExcluded";
 
 static void
 save_state_to_book(GncPluginPageRetirementPrivate* priv)
@@ -674,8 +686,13 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv)
                            gtk_toggle_button_get_active(priv->btn_toggle_params));
 
     g_key_file_remove_group(state, STATE_GROUP_ACCTS, nullptr);
+    g_key_file_remove_group(state, STATE_GROUP_EXCLUDED, nullptr);
     for (const auto& a : priv->accounts)
+    {
         g_key_file_set_string(state, STATE_GROUP_ACCTS, a.full_name.c_str(), bucket_label(a.bucket));
+        if (!a.included)
+            g_key_file_set_boolean(state, STATE_GROUP_EXCLUDED, a.full_name.c_str(), TRUE);
+    }
 }
 
 static void
@@ -778,6 +795,20 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
         }
         g_strfreev(keys);
         apply_account_overrides_to_ui(priv, overrides);
+    }
+
+    if (g_key_file_has_group(state, STATE_GROUP_EXCLUDED))
+    {
+        for (auto& a : priv->accounts)
+        {
+            GError* err = nullptr;
+            gboolean ex = g_key_file_get_boolean(state, STATE_GROUP_EXCLUDED, a.full_name.c_str(), &err);
+            if (err)
+                g_error_free(err);
+            else if (ex)
+                a.included = false;
+        }
+        sync_acct_store_from_accounts(priv);
     }
 }
 
@@ -1125,9 +1156,26 @@ static void
 on_refresh_accounts_clicked(GtkButton*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
-    auto overrides = collect_account_overrides(priv);
+    struct SavedAcct { std::string name; TaxBucket bucket; bool included; };
+    std::vector<SavedAcct> saved;
+    saved.reserve(priv->accounts.size());
+    for (const auto& a : priv->accounts)
+        saved.push_back({a.full_name, a.bucket, a.included});
+
     refresh_accounts_from_book(priv);
-    apply_account_overrides_to_ui(priv, overrides);
+    for (auto& a : priv->accounts)
+    {
+        for (const auto& s : saved)
+        {
+            if (a.full_name == s.name)
+            {
+                a.bucket = s.bucket;
+                a.included = s.included;
+                break;
+            }
+        }
+    }
+    sync_acct_store_from_accounts(priv);
     run_planner(priv);
 }
 
@@ -1295,16 +1343,141 @@ on_display_option_changed(GtkWidget*, gpointer user_data)
     save_state_to_book(priv);
 }
 
+static gboolean
+acct_filter_visible_func(GtkTreeModel* model, GtkTreeIter* iter, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (!priv->entry_acct_filter)
+        return TRUE;
+    const gchar* query = gtk_entry_get_text(GTK_ENTRY(priv->entry_acct_filter));
+    if (!query || !*query)
+        return TRUE;
+
+    gchar* name = nullptr;
+    gchar* bucket = nullptr;
+    gtk_tree_model_get(model, iter, ACCT_COL_NAME, &name, ACCT_COL_BUCKET_STR, &bucket, -1);
+
+    gchar* q_lc = g_utf8_strdown(query, -1);
+    gchar* n_lc = name ? g_utf8_strdown(name, -1) : g_strdup("");
+    gchar* b_lc = bucket ? g_utf8_strdown(bucket, -1) : g_strdup("");
+    gboolean match = (std::strstr(n_lc, q_lc) != nullptr) || (std::strstr(b_lc, q_lc) != nullptr);
+
+    g_free(q_lc);
+    g_free(n_lc);
+    g_free(b_lc);
+    g_free(name);
+    g_free(bucket);
+    return match;
+}
+
+static void
+on_acct_filter_changed(GtkSearchEntry*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (priv->acct_filter)
+        gtk_tree_model_filter_refilter(priv->acct_filter);
+}
+
+static void
+on_account_include_toggled(GtkCellRendererToggle*, gchar* path_str, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    GtkTreePath* filt_path = gtk_tree_path_new_from_string(path_str);
+    GtkTreeIter filt_iter;
+    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(priv->acct_filter), &filt_iter, filt_path))
+    {
+        GtkTreeIter child_iter;
+        gtk_tree_model_filter_convert_iter_to_child_iter(priv->acct_filter, &child_iter, &filt_iter);
+        int orig_idx = -1;
+        gtk_tree_model_get(GTK_TREE_MODEL(priv->acct_store), &child_iter,
+                           ACCT_COL_ORIG_IDX, &orig_idx, -1);
+        if (orig_idx >= 0 && orig_idx < static_cast<int>(priv->accounts.size()))
+        {
+            auto& ma = priv->accounts[static_cast<size_t>(orig_idx)];
+            ma.included = !ma.included;
+            if (ma.included && ma.bucket == TaxBucket::Excluded)
+                ma.bucket = TaxBucket::Taxable;
+            gtk_list_store_set(priv->acct_store, &child_iter,
+                               ACCT_COL_INCLUDE, ma.included ? TRUE : FALSE,
+                               ACCT_COL_BUCKET_STR, bucket_label(ma.bucket),
+                               ACCT_COL_BUCKET_ID, static_cast<int>(ma.bucket),
+                               -1);
+            update_bucket_summary_label(priv);
+            run_planner(priv);
+        }
+    }
+    gtk_tree_path_free(filt_path);
+}
+
+static void
+set_visible_accounts_included(GncPluginPageRetirementPrivate* priv, bool include)
+{
+    GtkTreeIter filt_iter;
+    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(priv->acct_filter), &filt_iter))
+    {
+        do
+        {
+            GtkTreeIter child_iter;
+            gtk_tree_model_filter_convert_iter_to_child_iter(priv->acct_filter, &child_iter, &filt_iter);
+            int orig_idx = -1;
+            gtk_tree_model_get(GTK_TREE_MODEL(priv->acct_store), &child_iter,
+                               ACCT_COL_ORIG_IDX, &orig_idx, -1);
+            if (orig_idx >= 0 && orig_idx < static_cast<int>(priv->accounts.size()))
+            {
+                auto& ma = priv->accounts[static_cast<size_t>(orig_idx)];
+                ma.included = include;
+                if (include && ma.bucket == TaxBucket::Excluded)
+                    ma.bucket = TaxBucket::Taxable;
+                gtk_list_store_set(priv->acct_store, &child_iter,
+                                   ACCT_COL_INCLUDE, ma.included ? TRUE : FALSE,
+                                   ACCT_COL_BUCKET_STR, bucket_label(ma.bucket),
+                                   ACCT_COL_BUCKET_ID, static_cast<int>(ma.bucket),
+                                   -1);
+            }
+        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(priv->acct_filter), &filt_iter));
+    }
+    update_bucket_summary_label(priv);
+    run_planner(priv);
+}
+
+static void
+on_select_all_accounts(GtkButton*, gpointer user_data)
+{
+    set_visible_accounts_included(static_cast<GncPluginPageRetirementPrivate*>(user_data), true);
+}
+
+static void
+on_deselect_all_accounts(GtkButton*, gpointer user_data)
+{
+    set_visible_accounts_included(static_cast<GncPluginPageRetirementPrivate*>(user_data), false);
+}
+
+static void
+on_auto_classify_accounts(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    for (auto& ma : priv->accounts)
+    {
+        ma.bucket = classify_account_name(ma.full_name);
+        ma.included = (ma.bucket != TaxBucket::Excluded);
+    }
+    sync_acct_store_from_accounts(priv);
+    run_planner(priv);
+}
+
 static void
 on_bucket_edited(GtkCellRendererText*, gchar* path_str, gchar* new_text, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
-    GtkTreePath* path = gtk_tree_path_new_from_string(path_str);
-    GtkTreeIter iter;
-    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(priv->acct_store), &iter, path))
+    GtkTreePath* filt_path = gtk_tree_path_new_from_string(path_str);
+    GtkTreeIter filt_iter;
+    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(priv->acct_filter), &filt_iter, filt_path))
     {
-        int* indices = gtk_tree_path_get_indices(path);
-        int idx = indices ? indices[0] : -1;
+        GtkTreeIter child_iter;
+        gtk_tree_model_filter_convert_iter_to_child_iter(priv->acct_filter, &child_iter, &filt_iter);
+        int orig_idx = -1;
+        gtk_tree_model_get(GTK_TREE_MODEL(priv->acct_store), &child_iter,
+                           ACCT_COL_ORIG_IDX, &orig_idx, -1);
         TaxBucket chosen = TaxBucket::Taxable;
         for (int b = 0; b <= static_cast<int>(TaxBucket::Excluded); ++b)
         {
@@ -1315,17 +1488,22 @@ on_bucket_edited(GtkCellRendererText*, gchar* path_str, gchar* new_text, gpointe
                 break;
             }
         }
-        if (idx >= 0 && idx < static_cast<int>(priv->accounts.size()))
-            priv->accounts[static_cast<size_t>(idx)].bucket = chosen;
+        bool inc = (chosen != TaxBucket::Excluded);
+        if (orig_idx >= 0 && orig_idx < static_cast<int>(priv->accounts.size()))
+        {
+            priv->accounts[static_cast<size_t>(orig_idx)].bucket = chosen;
+            priv->accounts[static_cast<size_t>(orig_idx)].included = inc;
+        }
 
-        gtk_list_store_set(priv->acct_store, &iter,
+        gtk_list_store_set(priv->acct_store, &child_iter,
+                           ACCT_COL_INCLUDE, inc ? TRUE : FALSE,
                            ACCT_COL_BUCKET_STR, bucket_label(chosen),
                            ACCT_COL_BUCKET_ID, static_cast<int>(chosen),
                            -1);
         update_bucket_summary_label(priv);
         run_planner(priv);
     }
-    gtk_tree_path_free(path);
+    gtk_tree_path_free(filt_path);
 }
 
 static GtkSpinButton*
@@ -1672,10 +1850,48 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_container_add(GTK_CONTAINER(cmp_scroll), cmp_tv);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), cmp_scroll, gtk_label_new(_("Baseline vs Owl")));
 
-    // Tab 4: Account Mapping (ellipsized account names so long fund names never blow up window width)
+    // Tab 4: Account Mapping (filterable, with Include checkbox & bulk selection)
     priv->acct_store = gtk_list_store_new(NUM_ACCT_COLS,
-        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT);
-    GtkWidget* acct_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->acct_store));
+        G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT);
+    priv->acct_filter = GTK_TREE_MODEL_FILTER(
+        gtk_tree_model_filter_new(GTK_TREE_MODEL(priv->acct_store), nullptr));
+    gtk_tree_model_filter_set_visible_func(priv->acct_filter, acct_filter_visible_func, priv, nullptr);
+
+    GtkWidget* tab_acct = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_set_border_width(GTK_CONTAINER(tab_acct), 6);
+
+    GtkWidget* acct_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    priv->entry_acct_filter = GTK_SEARCH_ENTRY(gtk_search_entry_new());
+    gtk_entry_set_placeholder_text(GTK_ENTRY(priv->entry_acct_filter), _("Filter accounts..."));
+    gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_acct_filter), TRUE);
+    g_signal_connect(priv->entry_acct_filter, "search-changed", G_CALLBACK(on_acct_filter_changed), priv);
+    gtk_box_pack_start(GTK_BOX(acct_bar), GTK_WIDGET(priv->entry_acct_filter), TRUE, TRUE, 0);
+
+    GtkWidget* btn_sel_all = gtk_button_new_with_label(_("Select All"));
+    g_signal_connect(btn_sel_all, "clicked", G_CALLBACK(on_select_all_accounts), priv);
+    gtk_box_pack_start(GTK_BOX(acct_bar), btn_sel_all, FALSE, FALSE, 0);
+
+    GtkWidget* btn_desel_all = gtk_button_new_with_label(_("Deselect All"));
+    g_signal_connect(btn_desel_all, "clicked", G_CALLBACK(on_deselect_all_accounts), priv);
+    gtk_box_pack_start(GTK_BOX(acct_bar), btn_desel_all, FALSE, FALSE, 0);
+
+    GtkWidget* btn_auto_cls = gtk_button_new_with_label(_("Auto-Classify"));
+    g_signal_connect(btn_auto_cls, "clicked", G_CALLBACK(on_auto_classify_accounts), priv);
+    gtk_box_pack_start(GTK_BOX(acct_bar), btn_auto_cls, FALSE, FALSE, 0);
+
+    priv->lbl_acct_count = GTK_LABEL(gtk_label_new(""));
+    gtk_style_context_add_class(gtk_widget_get_style_context(GTK_WIDGET(priv->lbl_acct_count)),
+                                "gnc-class-lighter-grey-mix");
+    gtk_box_pack_end(GTK_BOX(acct_bar), GTK_WIDGET(priv->lbl_acct_count), FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(tab_acct), acct_bar, FALSE, FALSE, 0);
+
+    GtkWidget* acct_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->acct_filter));
+
+    GtkCellRenderer* inc_rend = gtk_cell_renderer_toggle_new();
+    g_signal_connect(inc_rend, "toggled", G_CALLBACK(on_account_include_toggled), priv);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv),
+        gtk_tree_view_column_new_with_attributes(_("Include"),
+            inc_rend, "active", ACCT_COL_INCLUDE, nullptr));
 
     GtkCellRenderer* acct_name_rend = gtk_cell_renderer_text_new();
     g_object_set(acct_name_rend, "ellipsize", PANGO_ELLIPSIZE_MIDDLE, nullptr);
@@ -1714,7 +1930,8 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_scrolled_window_set_min_content_width(GTK_SCROLLED_WINDOW(acct_scroll), 200);
     gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(acct_scroll), 200);
     gtk_container_add(GTK_CONTAINER(acct_scroll), acct_tv);
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), acct_scroll, gtk_label_new(_("Account Mapping")));
+    gtk_box_pack_start(GTK_BOX(tab_acct), acct_scroll, TRUE, TRUE, 0);
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_acct, gtk_label_new(_("Account Mapping")));
 
     priv->root_widget = outer;
     gtk_widget_show_all(priv->root_widget);
@@ -1736,10 +1953,14 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         save_state_to_book(priv);
         g_object_unref(priv->sched_store);
         g_object_unref(priv->cmp_store);
+        g_object_unref(priv->acct_filter);
         g_object_unref(priv->acct_store);
         priv->sched_store = nullptr;
         priv->cmp_store = nullptr;
+        priv->acct_filter = nullptr;
         priv->acct_store = nullptr;
+        priv->entry_acct_filter = nullptr;
+        priv->lbl_acct_count = nullptr;
         priv->chart_area = nullptr;
         priv->left_panel = nullptr;
         priv->root_widget = nullptr;
