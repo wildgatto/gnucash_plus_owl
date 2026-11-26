@@ -625,6 +625,9 @@ MonteCarloSummary run_monte_carlo(const PlanInput& input,
 
     std::vector<double> end_balances;
     end_balances.reserve(static_cast<size_t>(mc.trials));
+    std::vector<std::vector<double>> yearly_real(static_cast<size_t>(n_years));
+    for (auto& yr : yearly_real)
+        yr.reserve(static_cast<size_t>(mc.trials));
     std::vector<double> returns(static_cast<size_t>(n_years));
 
     int successes = 0;
@@ -636,24 +639,48 @@ MonteCarloSummary run_monte_carlo(const PlanInput& input,
         PlanResult r = simulate_with_returns(
             input, strategy, ss_claim_age, annual_spending_real, returns);
         if (!r.schedule.empty())
+        {
             end_balances.push_back(r.final_bequest_real);
+            const size_t yrs = std::min(yearly_real.size(), r.schedule.size());
+            for (size_t y = 0; y < yrs; ++y)
+                yearly_real[y].push_back(r.schedule[y].end_total_real);
+        }
         if (r.plan_feasible)
             ++successes;
     }
+
+    auto calc_pct = [](std::vector<double>& vals, double p) -> double {
+        if (vals.empty())
+            return 0.0;
+        size_t idx = static_cast<size_t>(
+            std::clamp(p * (vals.size() - 1), 0.0,
+                       static_cast<double>(vals.size() - 1)));
+        return vals[idx];
+    };
 
     std::sort(end_balances.begin(), end_balances.end());
     mc.success_rate = static_cast<double>(successes) / static_cast<double>(mc.trials);
     if (!end_balances.empty())
     {
-        auto pct = [&](double p) -> double {
-            size_t idx = static_cast<size_t>(
-                std::clamp(p * (end_balances.size() - 1), 0.0,
-                           static_cast<double>(end_balances.size() - 1)));
-            return end_balances[idx];
-        };
-        mc.p10_end_real = pct(0.10);
-        mc.p50_end_real = pct(0.50);
-        mc.p90_end_real = pct(0.90);
+        mc.p10_end_real = calc_pct(end_balances, 0.10);
+        mc.p50_end_real = calc_pct(end_balances, 0.50);
+        mc.p90_end_real = calc_pct(end_balances, 0.90);
+    }
+
+    mc.p10_real.resize(static_cast<size_t>(n_years), 0.0);
+    mc.p25_real.resize(static_cast<size_t>(n_years), 0.0);
+    mc.p50_real.resize(static_cast<size_t>(n_years), 0.0);
+    mc.p75_real.resize(static_cast<size_t>(n_years), 0.0);
+    mc.p90_real.resize(static_cast<size_t>(n_years), 0.0);
+    for (int y = 0; y < n_years; ++y)
+    {
+        auto& vals = yearly_real[static_cast<size_t>(y)];
+        std::sort(vals.begin(), vals.end());
+        mc.p10_real[static_cast<size_t>(y)] = calc_pct(vals, 0.10);
+        mc.p25_real[static_cast<size_t>(y)] = calc_pct(vals, 0.25);
+        mc.p50_real[static_cast<size_t>(y)] = calc_pct(vals, 0.50);
+        mc.p75_real[static_cast<size_t>(y)] = calc_pct(vals, 0.75);
+        mc.p90_real[static_cast<size_t>(y)] = calc_pct(vals, 0.90);
     }
     return mc;
 }

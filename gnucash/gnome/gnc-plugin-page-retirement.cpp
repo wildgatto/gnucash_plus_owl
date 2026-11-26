@@ -62,7 +62,9 @@ enum class ChartMode
 {
     PortfolioBuckets = 0,
     IncomeAndWithdrawals = 1,
-    TaxesRmdAndRoth = 2
+    TaxesRmdAndRoth = 2,
+    MonteCarloFan = 3,
+    TaxAndHealthcare = 4
 };
 
 enum
@@ -663,7 +665,7 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
 
     apply_plan_input_to_ui(priv, in);
 
-    int chart_mode = std::clamp(get_int("chart_mode", 0), 0, 2);
+    int chart_mode = std::clamp(get_int("chart_mode", 0), 0, 4);
     gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_chart_mode), chart_mode);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_real_dollars),
                                  get_bool("real_dollars", true));
@@ -753,7 +755,7 @@ on_chart_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data)
         return FALSE;
 
     const ChartMode mode = static_cast<ChartMode>(
-        std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_chart_mode)), 0, 2));
+        std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_chart_mode)), 0, 4));
     const bool use_real = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_real_dollars));
     const double inf_rate = priv->last_input.inflation;
 
@@ -763,6 +765,7 @@ on_chart_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data)
     if (plot_w <= 10 || plot_h <= 10)
         return FALSE;
 
+    const auto& mc = priv->last_result.monte_carlo;
     auto bar_total_for = [&](size_t i) -> double {
         const auto& yp = sched[i];
         double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(i)) : 1.0;
@@ -775,6 +778,17 @@ on_chart_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data)
                         yp.withdraw_tax_deferred + yp.withdraw_tax_free + yp.withdraw_hsa) / div;
             case ChartMode::TaxesRmdAndRoth:
                 return (yp.total_tax + yp.rmd_amount + yp.roth_conversion) / div;
+            case ChartMode::MonteCarloFan:
+            {
+                double det = yp.end_total_nominal / div;
+                double p90 = (i < mc.p90_real.size())
+                    ? (use_real ? mc.p90_real[i] : mc.p90_real[i] * std::pow(1.0 + inf_rate, static_cast<double>(i)))
+                    : 0.0;
+                return std::max(det, p90);
+            }
+            case ChartMode::TaxAndHealthcare:
+                return (yp.ordinary_tax + yp.ltcg_tax + yp.niit_tax +
+                        yp.state_tax + yp.irmaa_surcharge + yp.aca_premium) / div;
         }
         return 0.0;
     };
@@ -803,56 +817,139 @@ on_chart_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data)
     }
 
     const size_t n = sched.size();
-    const double bar_step = plot_w / static_cast<double>(n);
-    const double bar_w = std::max(2.0, bar_step * 0.72);
-
-    for (size_t i = 0; i < n; ++i)
+    if (mode == ChartMode::MonteCarloFan)
     {
-        const auto& yp = sched[i];
-        const double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(i)) : 1.0;
-        double x = pad_l + i * bar_step + (bar_step - bar_w) * 0.5;
-        double y_cur = pad_t + plot_h;
-
-        auto draw_seg = [&](double val, double r, double g, double b) {
-            if (val <= 0.0) return;
-            double seg_h = ((val / div) / max_val) * plot_h;
-            cairo_set_source_rgba(cr, r, g, b, 0.88);
-            cairo_rectangle(cr, x, y_cur - seg_h, bar_w, seg_h);
-            cairo_fill(cr);
-            y_cur -= seg_h;
+        auto x_at = [&](size_t i) -> double {
+            return pad_l + (n > 1 ? (static_cast<double>(i) / static_cast<double>(n - 1)) * plot_w : plot_w * 0.5);
+        };
+        auto y_at = [&](double val) -> double {
+            return pad_t + plot_h * (1.0 - std::clamp(val / max_val, 0.0, 1.0));
+        };
+        auto mc_val = [&](const std::vector<double>& vec, size_t i) -> double {
+            if (i >= vec.size()) return 0.0;
+            return use_real ? vec[i] : vec[i] * std::pow(1.0 + inf_rate, static_cast<double>(i));
         };
 
-        if (mode == ChartMode::PortfolioBuckets)
+        if (mc.p90_real.size() >= n && mc.p10_real.size() >= n)
         {
-            draw_seg(yp.end_taxable,      0.21, 0.52, 0.89);
-            draw_seg(yp.end_tax_deferred, 0.90, 0.65, 0.04);
-            draw_seg(yp.end_tax_free,     0.18, 0.76, 0.49);
-            draw_seg(yp.end_hsa,          0.57, 0.25, 0.67);
-        }
-        else if (mode == ChartMode::IncomeAndWithdrawals)
-        {
-            draw_seg(yp.ss_income + yp.pension_income, 0.45, 0.55, 0.65);
-            draw_seg(yp.withdraw_taxable,              0.21, 0.52, 0.89);
-            draw_seg(yp.withdraw_tax_deferred,         0.90, 0.65, 0.04);
-            draw_seg(yp.withdraw_tax_free + yp.withdraw_hsa, 0.18, 0.76, 0.49);
-        }
-        else
-        {
-            draw_seg(yp.ordinary_tax + yp.ltcg_tax + yp.niit_tax, 0.85, 0.22, 0.22);
-            draw_seg(yp.state_tax,       0.75, 0.35, 0.55);
-            draw_seg(yp.irmaa_surcharge + yp.aca_premium, 0.90, 0.45, 0.10);
-            draw_seg(yp.rmd_amount,      0.90, 0.65, 0.04);
-            draw_seg(yp.roth_conversion, 0.18, 0.76, 0.49);
+            // P10-P90 outer band
+            cairo_move_to(cr, x_at(0), y_at(mc_val(mc.p90_real, 0)));
+            for (size_t i = 1; i < n; ++i)
+                cairo_line_to(cr, x_at(i), y_at(mc_val(mc.p90_real, i)));
+            for (size_t i = n; i-- > 0;)
+                cairo_line_to(cr, x_at(i), y_at(mc_val(mc.p10_real, i)));
+            cairo_close_path(cr);
+            cairo_set_source_rgba(cr, 0.21, 0.52, 0.89, 0.16);
+            cairo_fill(cr);
+
+            // P25-P75 inner band
+            cairo_move_to(cr, x_at(0), y_at(mc_val(mc.p75_real, 0)));
+            for (size_t i = 1; i < n; ++i)
+                cairo_line_to(cr, x_at(i), y_at(mc_val(mc.p75_real, i)));
+            for (size_t i = n; i-- > 0;)
+                cairo_line_to(cr, x_at(i), y_at(mc_val(mc.p25_real, i)));
+            cairo_close_path(cr);
+            cairo_set_source_rgba(cr, 0.21, 0.52, 0.89, 0.28);
+            cairo_fill(cr);
+
+            // P50 median line
+            cairo_set_source_rgba(cr, 0.15, 0.45, 0.85, 0.95);
+            cairo_set_line_width(cr, 2.5);
+            cairo_move_to(cr, x_at(0), y_at(mc_val(mc.p50_real, 0)));
+            for (size_t i = 1; i < n; ++i)
+                cairo_line_to(cr, x_at(i), y_at(mc_val(mc.p50_real, i)));
+            cairo_stroke(cr);
         }
 
-        if (i == 0 || i == n - 1 || (yp.age % 5 == 0))
+        // Deterministic baseline line (dashed)
+        double dashes[] = { 6.0, 4.0 };
+        cairo_set_dash(cr, dashes, 2, 0.0);
+        cairo_set_source_rgba(cr, 0.18, 0.76, 0.49, 0.95);
+        cairo_set_line_width(cr, 2.0);
+        for (size_t i = 0; i < n; ++i)
         {
-            cairo_set_source_rgba(cr, fg_color.red, fg_color.green, fg_color.blue, 0.78);
-            cairo_set_font_size(cr, 11.0);
-            char age_buf[16];
-            std::snprintf(age_buf, sizeof(age_buf), "%d", yp.age);
-            cairo_move_to(cr, x, pad_t + plot_h + 18.0);
-            cairo_show_text(cr, age_buf);
+            double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(i)) : 1.0;
+            double y = y_at(sched[i].end_total_nominal / div);
+            if (i == 0) cairo_move_to(cr, x_at(i), y);
+            else        cairo_line_to(cr, x_at(i), y);
+        }
+        cairo_stroke(cr);
+        cairo_set_dash(cr, nullptr, 0, 0.0);
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (i == 0 || i == n - 1 || (sched[i].age % 5 == 0))
+            {
+                cairo_set_source_rgba(cr, fg_color.red, fg_color.green, fg_color.blue, 0.78);
+                cairo_set_font_size(cr, 11.0);
+                char age_buf[16];
+                std::snprintf(age_buf, sizeof(age_buf), "%d", sched[i].age);
+                cairo_move_to(cr, x_at(i) - 6.0, pad_t + plot_h + 18.0);
+                cairo_show_text(cr, age_buf);
+            }
+        }
+    }
+    else
+    {
+        const double bar_step = plot_w / static_cast<double>(n);
+        const double bar_w = std::max(2.0, bar_step * 0.72);
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            const auto& yp = sched[i];
+            const double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(i)) : 1.0;
+            double x = pad_l + i * bar_step + (bar_step - bar_w) * 0.5;
+            double y_cur = pad_t + plot_h;
+
+            auto draw_seg = [&](double val, double r, double g, double b) {
+                if (val <= 0.0) return;
+                double seg_h = ((val / div) / max_val) * plot_h;
+                cairo_set_source_rgba(cr, r, g, b, 0.88);
+                cairo_rectangle(cr, x, y_cur - seg_h, bar_w, seg_h);
+                cairo_fill(cr);
+                y_cur -= seg_h;
+            };
+
+            if (mode == ChartMode::PortfolioBuckets)
+            {
+                draw_seg(yp.end_taxable,      0.21, 0.52, 0.89);
+                draw_seg(yp.end_tax_deferred, 0.90, 0.65, 0.04);
+                draw_seg(yp.end_tax_free,     0.18, 0.76, 0.49);
+                draw_seg(yp.end_hsa,          0.57, 0.25, 0.67);
+            }
+            else if (mode == ChartMode::IncomeAndWithdrawals)
+            {
+                draw_seg(yp.ss_income + yp.pension_income, 0.45, 0.55, 0.65);
+                draw_seg(yp.withdraw_taxable,              0.21, 0.52, 0.89);
+                draw_seg(yp.withdraw_tax_deferred,         0.90, 0.65, 0.04);
+                draw_seg(yp.withdraw_tax_free + yp.withdraw_hsa, 0.18, 0.76, 0.49);
+            }
+            else if (mode == ChartMode::TaxesRmdAndRoth)
+            {
+                draw_seg(yp.ordinary_tax + yp.ltcg_tax + yp.niit_tax, 0.85, 0.22, 0.22);
+                draw_seg(yp.state_tax,       0.75, 0.35, 0.55);
+                draw_seg(yp.irmaa_surcharge + yp.aca_premium, 0.90, 0.45, 0.10);
+                draw_seg(yp.rmd_amount,      0.90, 0.65, 0.04);
+                draw_seg(yp.roth_conversion, 0.18, 0.76, 0.49);
+            }
+            else
+            {
+                draw_seg(yp.ordinary_tax,               0.85, 0.22, 0.22);
+                draw_seg(yp.ltcg_tax + yp.niit_tax,     0.72, 0.20, 0.55);
+                draw_seg(yp.state_tax,                  0.42, 0.35, 0.78);
+                draw_seg(yp.irmaa_surcharge,            0.90, 0.45, 0.10);
+                draw_seg(yp.aca_premium,                0.10, 0.65, 0.68);
+            }
+
+            if (i == 0 || i == n - 1 || (yp.age % 5 == 0))
+            {
+                cairo_set_source_rgba(cr, fg_color.red, fg_color.green, fg_color.blue, 0.78);
+                cairo_set_font_size(cr, 11.0);
+                char age_buf[16];
+                std::snprintf(age_buf, sizeof(age_buf), "%d", yp.age);
+                cairo_move_to(cr, x, pad_t + plot_h + 18.0);
+                cairo_show_text(cr, age_buf);
+            }
         }
     }
 
@@ -876,7 +973,7 @@ on_chart_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data)
             { "Roth/HSA Wd",  0.18, 0.76, 0.49 },
         };
     }
-    else
+    else if (mode == ChartMode::TaxesRmdAndRoth)
     {
         items = {
             { "Fed Tax",    0.85, 0.22, 0.22 },
@@ -884,6 +981,25 @@ on_chart_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data)
             { "IRMAA/ACA",  0.90, 0.45, 0.10 },
             { "RMD",        0.90, 0.65, 0.04 },
             { "Roth Conv",  0.18, 0.76, 0.49 },
+        };
+    }
+    else if (mode == ChartMode::MonteCarloFan)
+    {
+        items = {
+            { "P10-P90",       0.21, 0.52, 0.89 },
+            { "P25-P75",       0.21, 0.52, 0.89 },
+            { "Median (P50)",  0.15, 0.45, 0.85 },
+            { "Deterministic", 0.18, 0.76, 0.49 },
+        };
+    }
+    else
+    {
+        items = {
+            { "Fed Ord",     0.85, 0.22, 0.22 },
+            { "LTCG+NIIT",   0.72, 0.20, 0.55 },
+            { "State Tax",   0.42, 0.35, 0.78 },
+            { "IRMAA",       0.90, 0.45, 0.10 },
+            { "ACA (<65)",   0.10, 0.65, 0.68 },
         };
     }
 
@@ -1203,6 +1319,8 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_combo_box_text_append_text(priv->combo_chart_mode, _("Portfolio by Tax Bucket"));
     gtk_combo_box_text_append_text(priv->combo_chart_mode, _("Income & Withdrawals"));
     gtk_combo_box_text_append_text(priv->combo_chart_mode, _("Taxes, RMDs & Roth Conv"));
+    gtk_combo_box_text_append_text(priv->combo_chart_mode, _("Monte Carlo Fan (P10-P90)"));
+    gtk_combo_box_text_append_text(priv->combo_chart_mode, _("Tax & Healthcare Breakdown"));
     gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_chart_mode), 0);
     g_signal_connect(priv->combo_chart_mode, "changed", G_CALLBACK(on_display_option_changed), priv);
     gtk_box_pack_start(GTK_BOX(top_bar), GTK_WIDGET(priv->combo_chart_mode), FALSE, FALSE, 0);

@@ -185,6 +185,13 @@ struct MonteCarloSummary
     double p10_end_real = 0.0;
     double p50_end_real = 0.0;
     double p90_end_real = 0.0;
+
+    // Per-year portfolio percentiles in today's dollars (size = schedule.size())
+    std::vector<double> p10_real;
+    std::vector<double> p25_real;
+    std::vector<double> p50_real;
+    std::vector<double> p75_real;
+    std::vector<double> p90_real;
 };
 
 struct PlanResult

@@ -80,6 +80,16 @@ TEST(RetirementEngine, OptimizeMaximizeSpendingAndBaselineComparison)
     EXPECT_GT(res.monte_carlo.success_rate, 0.0);
     EXPECT_LE(res.monte_carlo.p10_end_real, res.monte_carlo.p50_end_real);
     EXPECT_LE(res.monte_carlo.p50_end_real, res.monte_carlo.p90_end_real);
+    ASSERT_EQ(res.monte_carlo.p10_real.size(), res.schedule.size());
+    ASSERT_EQ(res.monte_carlo.p50_real.size(), res.schedule.size());
+    ASSERT_EQ(res.monte_carlo.p90_real.size(), res.schedule.size());
+    for (size_t i = 0; i < res.schedule.size(); ++i)
+    {
+        EXPECT_LE(res.monte_carlo.p10_real[i], res.monte_carlo.p25_real[i]);
+        EXPECT_LE(res.monte_carlo.p25_real[i], res.monte_carlo.p50_real[i]);
+        EXPECT_LE(res.monte_carlo.p50_real[i], res.monte_carlo.p75_real[i]);
+        EXPECT_LE(res.monte_carlo.p75_real[i], res.monte_carlo.p90_real[i]);
+    }
 }
 
 TEST(RetirementEngine, OptimizeMaximizeBequest)
