@@ -83,6 +83,8 @@ enum
     COL_ROTH_CONV,
     COL_TOTAL_TAX,
     COL_NET_SPEND,
+    COL_FLOOR_GAP,
+    COL_RMD_REINV,
     NUM_SCHED_COLS
 };
 
@@ -152,6 +154,7 @@ struct GncPluginPageRetirementPrivate
     GtkCheckButton* chk_opt_ss = nullptr;
     GtkSpinButton* spin_pension = nullptr;
     GtkSpinButton* spin_pension_age = nullptr;
+    GtkCheckButton* chk_pension_cola = nullptr;
 
     GtkSpinButton* spin_contrib_tax = nullptr;
     GtkSpinButton* spin_contrib_def = nullptr;
@@ -185,6 +188,7 @@ struct GncPluginPageRetirementPrivate
     GtkCheckButton* chk_sp_opt_ss = nullptr;
     GtkSpinButton* spin_sp_pension = nullptr;
     GtkSpinButton* spin_sp_pension_age = nullptr;
+    GtkCheckButton* chk_sp_pension_cola = nullptr;
     GtkSpinButton* spin_sp_rmd_age = nullptr;
     GtkSpinButton* spin_sp_contrib_def = nullptr;
     GtkSpinButton* spin_sp_contrib_roth = nullptr;
@@ -445,6 +449,8 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
                            COL_ROTH_CONV, fmt_table_dollar(yp.roth_conversion / div).c_str(),
                            COL_TOTAL_TAX, fmt_table_dollar(yp.total_tax / div).c_str(),
                            COL_NET_SPEND, fmt_table_dollar(yp.net_spending_nominal / div).c_str(),
+                           COL_FLOOR_GAP, fmt_table_dollar(yp.floor_surplus_nominal / div).c_str(),
+                           COL_RMD_REINV, fmt_table_dollar(yp.rmd_reinvested / div).c_str(),
                            -1);
     }
 
@@ -526,6 +532,7 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.optimize_ss_age = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_opt_ss));
     in.pension_annual = gtk_spin_button_get_value(priv->spin_pension);
     in.pension_start_age = gtk_spin_button_get_value_as_int(priv->spin_pension_age);
+    in.pension_cola = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_pension_cola));
 
     in.contrib_taxable = gtk_spin_button_get_value(priv->spin_contrib_tax);
     in.contrib_tax_deferred = gtk_spin_button_get_value(priv->spin_contrib_def);
@@ -560,6 +567,7 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.spouse_optimize_ss_age = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_sp_opt_ss));
     in.spouse_pension_annual = gtk_spin_button_get_value(priv->spin_sp_pension);
     in.spouse_pension_start_age = gtk_spin_button_get_value_as_int(priv->spin_sp_pension_age);
+    in.spouse_pension_cola = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_sp_pension_cola));
     in.spouse_rmd_start_age = gtk_spin_button_get_value_as_int(priv->spin_sp_rmd_age);
     in.spouse_contrib_tax_deferred = gtk_spin_button_get_value(priv->spin_sp_contrib_def);
     in.spouse_contrib_tax_free = gtk_spin_button_get_value(priv->spin_sp_contrib_roth);
@@ -601,6 +609,7 @@ update_spouse_sensitivity(GncPluginPageRetirementPrivate* priv)
         GTK_WIDGET(priv->spin_sp_hor_age), GTK_WIDGET(priv->spin_sp_ss_fra),
         GTK_WIDGET(priv->spin_sp_ss_age), GTK_WIDGET(priv->chk_sp_opt_ss),
         GTK_WIDGET(priv->spin_sp_pension), GTK_WIDGET(priv->spin_sp_pension_age),
+        GTK_WIDGET(priv->chk_sp_pension_cola),
         GTK_WIDGET(priv->spin_sp_rmd_age), GTK_WIDGET(priv->spin_sp_contrib_def),
         GTK_WIDGET(priv->spin_sp_contrib_roth)
     };
@@ -628,6 +637,7 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_opt_ss), in.optimize_ss_age);
     gtk_spin_button_set_value(priv->spin_pension, in.pension_annual);
     gtk_spin_button_set_value(priv->spin_pension_age, in.pension_start_age);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_pension_cola), in.pension_cola);
 
     gtk_spin_button_set_value(priv->spin_contrib_tax, in.contrib_taxable);
     gtk_spin_button_set_value(priv->spin_contrib_def, in.contrib_tax_deferred);
@@ -661,6 +671,7 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_sp_opt_ss), in.spouse_optimize_ss_age);
     gtk_spin_button_set_value(priv->spin_sp_pension, in.spouse_pension_annual);
     gtk_spin_button_set_value(priv->spin_sp_pension_age, in.spouse_pension_start_age);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_sp_pension_cola), in.spouse_pension_cola);
     gtk_spin_button_set_value(priv->spin_sp_rmd_age, in.spouse_rmd_start_age);
     gtk_spin_button_set_value(priv->spin_sp_contrib_def, in.spouse_contrib_tax_deferred);
     gtk_spin_button_set_value(priv->spin_sp_contrib_roth, in.spouse_contrib_tax_free);
@@ -752,6 +763,7 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "optimize_ss_age", in.optimize_ss_age);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "pension_annual", in.pension_annual);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "pension_start_age", in.pension_start_age);
+    g_key_file_set_boolean(state, STATE_GROUP_PLAN, "pension_cola", in.pension_cola);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "contrib_taxable", in.contrib_taxable);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "contrib_tax_deferred", in.contrib_tax_deferred);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "contrib_tax_free", in.contrib_tax_free);
@@ -781,6 +793,7 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "spouse_optimize_ss_age", in.spouse_optimize_ss_age);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_pension_annual", in.spouse_pension_annual);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_pension_start_age", in.spouse_pension_start_age);
+    g_key_file_set_boolean(state, STATE_GROUP_PLAN, "spouse_pension_cola", in.spouse_pension_cola);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_rmd_start_age", in.spouse_rmd_start_age);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_contrib_tax_deferred", in.spouse_contrib_tax_deferred);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_contrib_tax_free", in.spouse_contrib_tax_free);
@@ -891,6 +904,7 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.optimize_ss_age = get_bool("optimize_ss_age", in.optimize_ss_age);
     in.pension_annual = std::max(0.0, get_dbl("pension_annual", in.pension_annual));
     in.pension_start_age = std::clamp(get_int("pension_start_age", in.pension_start_age), 50, 85);
+    in.pension_cola = get_bool("pension_cola", in.pension_cola);
     in.contrib_taxable = std::max(0.0, get_dbl("contrib_taxable", in.contrib_taxable));
     in.contrib_tax_deferred = std::max(0.0, get_dbl("contrib_tax_deferred", in.contrib_tax_deferred));
     in.contrib_tax_free = std::max(0.0, get_dbl("contrib_tax_free", in.contrib_tax_free));
@@ -924,6 +938,7 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.spouse_optimize_ss_age = get_bool("spouse_optimize_ss_age", in.spouse_optimize_ss_age);
     in.spouse_pension_annual = std::max(0.0, get_dbl("spouse_pension_annual", in.spouse_pension_annual));
     in.spouse_pension_start_age = std::clamp(get_int("spouse_pension_start_age", in.spouse_pension_start_age), 50, 85);
+    in.spouse_pension_cola = get_bool("spouse_pension_cola", in.spouse_pension_cola);
     in.spouse_rmd_start_age = std::clamp(get_int("spouse_rmd_start_age", in.spouse_rmd_start_age), 72, 75);
     in.spouse_contrib_tax_deferred = std::max(0.0, get_dbl("spouse_contrib_tax_deferred", in.spouse_contrib_tax_deferred));
     in.spouse_contrib_tax_free = std::max(0.0, get_dbl("spouse_contrib_tax_free", in.spouse_contrib_tax_free));
@@ -2359,6 +2374,9 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(g_inc, GTK_WIDGET(priv->chk_opt_ss), 0, r2++, 2, 1);
     priv->spin_pension = add_spin_row(g_inc, r2, _("Pension ($/yr)"), 0, 500000, 500, 0);
     priv->spin_pension_age = add_spin_row(g_inc, r2, _("Pension Age"), 50, 85, 1, 65);
+    priv->chk_pension_cola = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Pension COLA (Inflation-Adjusted)")));
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_pension_cola), TRUE);
+    gtk_grid_attach(g_inc, GTK_WIDGET(priv->chk_pension_cola), 0, r2++, 2, 1);
     priv->spin_tips_floor = add_spin_row(g_inc, r2, _("TIPS Floor ($/yr)"), 0, 500000, 1000, 0);
     priv->spin_contrib_tax = add_spin_row(g_inc, r2, _("Taxable Contrib/yr"), 0, 500000, 500, 10000);
     priv->spin_contrib_def = add_spin_row(g_inc, r2, _("401k/IRA Contrib/yr"), 0, 100000, 500, 23000);
@@ -2430,6 +2448,9 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(g_sp, GTK_WIDGET(priv->chk_sp_opt_ss), 0, r4++, 2, 1);
     priv->spin_sp_pension = add_spin_row(g_sp, r4, _("Spouse Pension ($/yr)"), 0, 500000, 500, 0);
     priv->spin_sp_pension_age = add_spin_row(g_sp, r4, _("Spouse Pension Age"), 50, 85, 1, 65);
+    priv->chk_sp_pension_cola = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Spouse Pension COLA (Inflation-Adjusted)")));
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_sp_pension_cola), TRUE);
+    gtk_grid_attach(g_sp, GTK_WIDGET(priv->chk_sp_pension_cola), 0, r4++, 2, 1);
     priv->spin_sp_rmd_age = add_spin_row(g_sp, r4, _("Spouse RMD Age"), 72, 75, 1, 73);
     priv->spin_sp_contrib_def = add_spin_row(g_sp, r4, _("Spouse 401k Contrib"), 0, 100000, 500, 0);
     priv->spin_sp_contrib_roth = add_spin_row(g_sp, r4, _("Spouse Roth Contrib"), 0, 100000, 500, 0);
@@ -2536,11 +2557,13 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     priv->sched_store = gtk_list_store_new(NUM_SCHED_COLS,
         G_TYPE_INT, G_TYPE_INT,
         G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
-        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+        G_TYPE_STRING, G_TYPE_STRING);
     GtkWidget* sched_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->sched_store));
     const char* sched_titles[] = {
         "Year", "Age", "Total", "Taxable", "401k/IRA", "Roth",
-        "HSA", "SS+Pens", "RMD", "Roth Conv", "Tax", "Net Spend"
+        "HSA", "SS+Pens", "RMD", "Roth Conv", "Tax", "Net Spend",
+        "Floor Gap", "RMD Reinv"
     };
     for (int c = 0; c < NUM_SCHED_COLS; ++c)
     {
