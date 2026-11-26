@@ -2249,7 +2249,7 @@ std::string build_ai_request_json(AiProvider provider,
     {
         oss << "{\"model\":\"" << json_escape(model) << "\","
             << "\"stream\":" << (stream ? "true" : "false") << ","
-            << "\"options\":{\"num_ctx\":" << num_ctx << ",\"num_predict\":" << max_tokens << "},"
+            << "\"options\":{\"temperature\":0.3,\"repeat_penalty\":1.15,\"num_predict\":" << max_tokens << "},"
             << "\"messages\":["
             << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},"
             << "{\"role\":\"user\",\"content\":\"" << json_escape(user_prompt) << "\"}"
@@ -2259,12 +2259,13 @@ std::string build_ai_request_json(AiProvider provider,
     {
         oss << "{\"system_instruction\":{\"parts\":[{\"text\":\"" << json_escape(system_prompt) << "\"}]},"
             << "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"" << json_escape(user_prompt) << "\"}]}],"
-            << "\"generationConfig\":{\"maxOutputTokens\":" << max_tokens << "}}";
+            << "\"generationConfig\":{\"temperature\":0.3,\"maxOutputTokens\":2048}}";
     }
     else
     {
         oss << "{\"model\":\"" << json_escape(model) << "\","
             << "\"stream\":" << (stream ? "true" : "false") << ","
+            << "\"temperature\":0.3,"
             << "\"max_tokens\":" << max_tokens << ","
             << "\"messages\":["
             << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},"
@@ -2300,6 +2301,9 @@ std::string extract_ai_stream_line(AiProvider provider,
 
     if (provider == AiProvider::Ollama)
     {
+        size_t msg_pos = s.find("\"message\"");
+        if (msg_pos != std::string::npos)
+            return find_json_string_field(s, "content", msg_pos);
         std::string tok = find_json_string_field(s, "response");
         if (tok.empty()) tok = find_json_string_field(s, "content");
         return tok;
@@ -2334,6 +2338,12 @@ std::string extract_ai_response_text(AiProvider provider,
 
     if (provider == AiProvider::Ollama)
     {
+        size_t msg_pos = response_json.find("\"message\"");
+        if (msg_pos != std::string::npos)
+        {
+            std::string txt = find_json_string_field(response_json, "content", msg_pos);
+            if (!txt.empty()) return txt;
+        }
         std::string txt = find_json_string_field(response_json, "response");
         if (txt.empty())
             txt = find_json_string_field(response_json, "content");
@@ -2342,9 +2352,19 @@ std::string extract_ai_response_text(AiProvider provider,
     if (provider == AiProvider::Gemini)
     {
         size_t cand = response_json.find("\"candidates\"");
-        std::string txt = find_json_string_field(
-            response_json, "text", (cand != std::string::npos) ? cand : 0);
-        return txt.empty() ? response_json : txt;
+        size_t pos = (cand != std::string::npos) ? cand : 0;
+        std::string combined;
+        while ((pos = response_json.find("\"text\"", pos)) != std::string::npos)
+        {
+            size_t colon = response_json.find(':', pos + 6);
+            if (colon == std::string::npos) break;
+            size_t val = colon + 1;
+            while (val < response_json.size() && std::isspace(static_cast<unsigned char>(response_json[val]))) ++val;
+            if (val < response_json.size() && response_json[val] == '"')
+                combined += parse_json_string_at(response_json, val);
+            pos += 6;
+        }
+        return combined.empty() ? response_json : combined;
     }
     // OpenAI-compatible: choices[0].message.content
     size_t ch = response_json.find("\"choices\"");

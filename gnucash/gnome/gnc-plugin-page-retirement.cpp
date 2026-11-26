@@ -2515,6 +2515,46 @@ on_ai_stream_read(GObject* source, GAsyncResult* res, gpointer user_data)
 }
 
 static void
+on_ai_gemini_finished(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<AiStreamCtx> ctx(static_cast<AiStreamCtx*>(user_data));
+    GncPluginPageRetirementPrivate* priv = ctx->priv;
+    GError* err = nullptr;
+    GBytes* bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), res, &err);
+
+    if (!priv || !priv->root_widget)
+    {
+        if (bytes) g_bytes_unref(bytes);
+        if (err) g_error_free(err);
+        return;
+    }
+
+    if (priv->btn_ai_stop)
+        gtk_widget_set_sensitive(priv->btn_ai_stop, FALSE);
+
+    if (!bytes)
+    {
+        std::string msg = std::string("Request failed: ") + (err ? err->message : "Unknown network error");
+        if (err) g_error_free(err);
+        set_ai_response_text(priv, msg);
+        if (priv->lbl_ai_status)
+            gtk_label_set_text(priv->lbl_ai_status, _("Error contacting Gemini API."));
+        return;
+    }
+
+    gsize len = 0;
+    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
+    std::string resp_str(raw ? raw : "", len);
+    g_bytes_unref(bytes);
+
+    std::string reply = extract_ai_response_text(ctx->provider, resp_str);
+    ctx->cleared_thinking = true;
+    ctx->full_reply = reply;
+    set_ai_response_text(priv, reply);
+    finish_ai_stream(std::move(ctx));
+}
+
+static void
 on_ai_send_opened(GObject* source, GAsyncResult* res, gpointer user_data)
 {
     std::unique_ptr<AiStreamCtx> ctx(static_cast<AiStreamCtx*>(user_data));
@@ -2534,6 +2574,16 @@ on_ai_send_opened(GObject* source, GAsyncResult* res, gpointer user_data)
         std::string msg = std::string("Request failed: ") + (err ? err->message : "Unknown network error");
         if (err) g_error_free(err);
         finish_ai_stream(std::move(ctx), msg.c_str());
+        return;
+    }
+
+    SoupMessage* sent_msg = soup_session_get_async_result_message(SOUP_SESSION(source), res);
+    guint status = sent_msg ? soup_message_get_status(sent_msg) : 200;
+    if (status == 404 && ctx->provider == AiProvider::Ollama)
+    {
+        g_object_unref(in_stream);
+        finish_ai_stream(std::move(ctx),
+                         "Model not found on Ollama (HTTP 404). Click 'Refresh Models' to pick an installed model.");
         return;
     }
 
@@ -2585,10 +2635,10 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
         if (gp != std::string::npos)
             url.replace(gp, 13, "/api/chat");
     }
-    else if (provider == AiProvider::Gemini && endpoint.find(":streamGenerateContent") == std::string::npos)
+    else if (provider == AiProvider::Gemini && endpoint.find(":generateContent") == std::string::npos)
     {
         if (!url.empty() && url.back() == '/') url.pop_back();
-        url += "/models/" + model + ":streamGenerateContent?alt=sse";
+        url += "/models/" + model + ":generateContent";
     }
 
     std::string sys_prompt =
@@ -2598,7 +2648,8 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
         "bridge_income_annual, enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
     std::string full_prompt = build_ai_plan_summary(priv->last_input, priv->last_result)
                             + "\nQuestion: " + user_question;
-    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, true, 2048, 512);
+    const bool use_stream = (provider != AiProvider::Gemini);
+    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, use_stream, 2048, 600);
 
     SoupMessage* msg = soup_message_new("POST", url.c_str());
     if (!msg)
@@ -2625,12 +2676,16 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
     if (priv->btn_ai_stop)
         gtk_widget_set_sensitive(priv->btn_ai_stop, TRUE);
     if (priv->lbl_ai_status)
-        gtk_label_set_text(priv->lbl_ai_status, _("Connecting / loading model..."));
-    set_ai_response_text(priv, "Thinking (streaming tokens)...");
+        gtk_label_set_text(priv->lbl_ai_status, use_stream ? _("Connecting / loading model...") : _("Contacting Gemini..."));
+    set_ai_response_text(priv, use_stream ? "Thinking (streaming tokens)..." : "Thinking...");
 
     auto* ctx = new AiStreamCtx{priv, provider};
-    soup_session_send_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, priv->ai_cancel,
-                            on_ai_send_opened, ctx);
+    if (use_stream)
+        soup_session_send_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, priv->ai_cancel,
+                                on_ai_send_opened, ctx);
+    else
+        soup_session_send_and_read_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, priv->ai_cancel,
+                                         on_ai_gemini_finished, ctx);
     g_object_unref(msg);
 }
 
