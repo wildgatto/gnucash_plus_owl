@@ -5185,6 +5185,17 @@ gnc_main_window_cmd_help_contents (GSimpleAction *simple,
                                    gpointer       user_data)
 {
     GncMainWindow *window = (GncMainWindow*)user_data;
+    GncPluginPage *page = gnc_main_window_get_current_page (window);
+    if (page)
+    {
+        auto help_fn = reinterpret_cast<void (*)(GncPluginPage*)>(
+            g_object_get_data (G_OBJECT(page), "gnc-page-help-fn"));
+        if (help_fn)
+        {
+            help_fn (page);
+            return;
+        }
+    }
     gnc_gnome_help (GTK_WINDOW(window), DF_MANUAL, NULL);
 }
 

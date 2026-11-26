@@ -1829,6 +1829,167 @@ show_error_dialog(GtkWindow* parent, const char* msg)
 }
 
 static void
+show_retirement_help_dialog(GtkWindow* parent)
+{
+    GtkWidget* dlg = gtk_dialog_new_with_buttons(
+        _("Retirement Planner (Owl) — Detailed Help"), parent,
+        static_cast<GtkDialogFlags>(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+        _("_Close"), GTK_RESPONSE_CLOSE, nullptr);
+    gtk_window_set_default_size(GTK_WINDOW(dlg), 820, 620);
+
+    GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    GtkWidget* nb = gtk_notebook_new();
+    gtk_container_set_border_width(GTK_CONTAINER(nb), 8);
+    gtk_box_pack_start(GTK_BOX(content), nb, TRUE, TRUE, 0);
+
+    auto add_help_tab = [&](const char* tab_title, const char* body_text) {
+        GtkWidget* tv = gtk_text_view_new();
+        gtk_text_view_set_editable(GTK_TEXT_VIEW(tv), FALSE);
+        gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(tv), FALSE);
+        gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(tv), GTK_WRAP_WORD_CHAR);
+        gtk_text_view_set_left_margin(GTK_TEXT_VIEW(tv), 12);
+        gtk_text_view_set_right_margin(GTK_TEXT_VIEW(tv), 12);
+        gtk_text_view_set_top_margin(GTK_TEXT_VIEW(tv), 10);
+        gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(tv), 10);
+
+        GtkTextBuffer* buf = gtk_text_buffer_new(nullptr);
+        gtk_text_buffer_set_text(buf, body_text, -1);
+        gtk_text_view_set_buffer(GTK_TEXT_VIEW(tv), buf);
+        g_object_unref(buf);
+
+        GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        gtk_container_add(GTK_CONTAINER(scroll), tv);
+        gtk_notebook_append_page(GTK_NOTEBOOK(nb), scroll, gtk_label_new(tab_title));
+    };
+
+    add_help_tab(_("Getting Started"),
+        "RETIREMENT PLANNER (OWL) — QUICK START GUIDE\n"
+        "============================================================\n\n"
+        "Note: This is an experimental personal planning module inspired by mdlacasse/Owl.\n"
+        "It is not affiliated with official GnuCash or Owl and is not financial/tax advice.\n\n"
+        "1. MAP YOUR GNUCASH ACCOUNTS (Account Mapping tab)\n"
+        "   • On opening, the planner imports Asset, Bank, Stock, and Mutual Fund balances.\n"
+        "   • Accounts are auto-classified into:\n"
+        "       - Taxable (brokerage, checking, savings)\n"
+        "       - Tax-Deferred (401k, 403b, Traditional IRA, TSP, SEP)\n"
+        "       - Tax-Free (Roth IRA, Roth 401k)\n"
+        "       - HSA (Health Savings Account)\n"
+        "       - Excluded (ignored in projections)\n"
+        "   • Use the Include checkboxes, search filter, Select All / Deselect All, or\n"
+        "     Auto-Classify to choose which accounts feed your starting balances.\n"
+        "   • Your Include selections and bucket overrides persist automatically per book.\n\n"
+        "2. CONFIGURE ASSUMPTIONS (Left Panel Tabs)\n"
+        "   • Adjust Profile, Income, Market/Tax, Spouse, and Phases & Events.\n"
+        "   • Click 'Run Optimization' in the top bar to re-solve.\n\n"
+        "3. SAVE, LOAD & EXPORT\n"
+        "   • Plan -> Save Plan As... / Load Plan... (*.owlplan / *.ini)\n"
+        "     The planner automatically remembers and reloads your last .owlplan file.\n"
+        "   • Export CSV... exports the full year-by-year projection table.\n"
+        "   • Report (HTML)... writes a self-contained HTML report with KPIs, an SVG\n"
+        "     chart, and the schedule table (open in a browser and press Ctrl+P for PDF).\n"
+        "   • Press F1 anytime while on this tab to reopen this Help window.\n");
+
+    add_help_tab(_("Plan Options"),
+        "LEFT PANEL: PLANNER OPTIONS & ASSUMPTIONS\n"
+        "============================================================\n\n"
+        "PROFILE TAB\n"
+        "  • Current / Retirement / Horizon Age: Defines the accumulation and\n"
+        "    retirement projection window.\n"
+        "  • Filing Status: Single or Married Filing Jointly (sets federal/state\n"
+        "    brackets, standard deductions, LTCG thresholds, NIIT, and IRMAA).\n"
+        "  • Objective:\n"
+        "      - Maximize Spending: Finds the highest sustainable real annual spending\n"
+        "        that meets your Target Bequest with zero shortfalls.\n"
+        "      - Maximize Bequest: Holds Target Spend fixed and maximizes after-tax\n"
+        "        estate value.\n"
+        "  • Strategy: Choose Auto-Optimize (Owl) to search Standard, Tax-Deferred First,\n"
+        "    and Roth Conversion bracket-fill (12%, 22%, 24%) strategies.\n\n"
+        "INCOME TAB\n"
+        "  • Social Security FRA ($/yr) & Claim Age (62–70): Check 'Auto-optimize SS age'\n"
+        "    to search 62–70 for the highest objective score.\n"
+        "  • Pension ($/yr), Age, & Pension COLA: Toggle COLA for inflation-adjusted vs.\n"
+        "    fixed nominal pensions.\n"
+        "  • TIPS Floor ($/yr): Optional inflation-adjusted guaranteed income floor.\n"
+        "  • Pre-retirement annual contributions to Taxable, 401k/IRA, Roth, and HSA.\n\n"
+        "MARKET / TAX TAB\n"
+        "  • Expected Return, Volatility, Inflation: Baseline market assumptions.\n"
+        "  • Taxable Basis (%): Initial cost-basis percentage for LTCG tax estimation.\n"
+        "  • Per-Bucket Return (% 0=auto): Override expected return for Taxable,\n"
+        "    401k/IRA, Roth, or HSA independently (0 inherits Expected Return).\n"
+        "  • RMD Start Age (72–75) & State Tax (50 states + DC).\n"
+        "  • Model ACA Marketplace (<65) & 400% FPL Cliff: Pre-Medicare subsidy modeling.\n"
+        "  • Re-invest RMD Surplus in Taxable: Re-invests excess after-tax RMD cash.\n"
+        "  • Guyton-Klinger Guardrails (+/-10%): Dynamically trims/boosts spending when\n"
+        "    withdrawal rate crosses 6.0% / 4.0% guardrails.\n"
+        "  • Use Equity/Bond Glide Path: Blends Pre-Retire and In-Retire Equity (%)\n"
+        "    allocations to drive return and Monte Carlo volatility.\n");
+
+    add_help_tab(_("Spouse, Phases & Events"),
+        "SPOUSE, SPENDING PHASES, DEBT, LTC & EVENTS\n"
+        "============================================================\n\n"
+        "SPOUSE TAB\n"
+        "  • Enable 'Include Spouse / Partner' for two-person household modeling.\n"
+        "  • Set spouse ages, independent SS FRA & claiming age (with joint SS\n"
+        "    optimization), spouse pension + COLA, RMD age, and contributions.\n"
+        "  • Survivor Benefit: When one spouse reaches their horizon age first, the\n"
+        "    surviving spouse keeps the higher of the two Social Security benefits\n"
+        "    and transitions to Single tax brackets.\n\n"
+        "PHASES & EVENTS TAB\n"
+        "  • Go-Go / Slow-Go / No-Go Phases: Scale base retirement spending at\n"
+        "    Slow-Go Age (e.g. 85% at 75) and No-Go Age (e.g. 70% at 85).\n"
+        "  • Fixed Debt / Mortgage ($/yr) & Payoff Age: Models a fixed nominal\n"
+        "    payment (not inflated by CPI) that ends when you reach Payoff Age.\n"
+        "  • LTC Start Age, Duration (yrs), & Cost ($/yr): Models a late-life\n"
+        "    Long-Term Care expense window in today's dollars.\n"
+        "  • One-Time Events: Add lump-sum windfalls (+) such as home downsizing or\n"
+        "    inheritances, or lump-sum expenses (-) routed to a specific tax bucket.\n");
+
+    add_help_tab(_("Charts, Stress & SS Break-Even"),
+        "RIGHT PANEL: CHARTS, SCHEDULES & STRESS TESTING\n"
+        "============================================================\n\n"
+        "OVERVIEW & CHART (5 MODES + HOVER TOOLTIPS)\n"
+        "  • Move your mouse over any chart to inspect exact year-by-year values.\n"
+        "  • Modes:\n"
+        "      1. Portfolio by Tax Bucket (Total, Taxable, 401k/IRA, Roth, HSA)\n"
+        "      2. Income & Withdrawals (SS, Pension, bucket draws, net spending)\n"
+        "      3. Taxes, RMDs & Roth Conv\n"
+        "      4. Monte Carlo Fan (P10 / P25 / P50 / P75 / P90 percentiles)\n"
+        "      5. Tax & Healthcare Breakdown (Federal Ord, LTCG, NIIT, State, IRMAA, ACA)\n\n"
+        "YEAR-BY-YEAR SCHEDULE\n"
+        "  • Toggle 'Today's $' to switch between real (inflation-adjusted) and nominal.\n"
+        "  • Includes Floor Gap (guaranteed income minus target spend), RMD Reinv,\n"
+        "    and Bracket / IRMAA (marginal federal bracket % and Medicare IRMAA tier).\n\n"
+        "STRESS & SENSITIVITY\n"
+        "  • Sequence-of-Returns Stress Tests: Early Crash, Lost Decade, Stagflation.\n"
+        "  • 5x5 Return vs. Spending Sensitivity Matrix: Color-coded feasibility grid.\n"
+        "  • Historical Market Backtests (1928–2024): Tests 97 rolling historical\n"
+        "    market cycles plus 1929, 1966, 1973, 2000, and 2008 crisis starts.\n\n"
+        "SS BREAK-EVEN\n"
+        "  • Compares Social Security claiming ages 62–70, showing annual benefit,\n"
+        "    break-even age vs. 62 and vs. 67, and cumulative real dollars at ages 65–95.\n");
+
+    gtk_widget_show_all(dlg);
+    gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+}
+
+static void
+on_retirement_help_clicked(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    show_retirement_help_dialog(get_parent_window(priv));
+}
+
+static void
+on_page_f1_help(GncPluginPage* page)
+{
+    auto* priv = GNC_PLUGIN_PAGE_RETIREMENT_GET_PRIVATE(GNC_PLUGIN_PAGE_RETIREMENT(page));
+    show_retirement_help_dialog(get_parent_window(priv));
+}
+
+static void
 on_export_csv_clicked(GtkWidget*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
@@ -2380,6 +2541,10 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     g_signal_connect(btn_export_html, "clicked", G_CALLBACK(on_export_html_clicked), priv);
     gtk_box_pack_end(GTK_BOX(top_bar), btn_export_html, FALSE, FALSE, 0);
 
+    GtkWidget* btn_help = gtk_button_new_with_label(_("Help (F1)"));
+    g_signal_connect(btn_help, "clicked", G_CALLBACK(on_retirement_help_clicked), priv);
+    gtk_box_pack_end(GTK_BOX(top_bar), btn_help, FALSE, FALSE, 0);
+
     GtkWidget* plan_menu = gtk_menu_new();
     GtkWidget* mi_save = gtk_menu_item_new_with_label(_("Save Plan As..."));
     GtkWidget* mi_load = gtk_menu_item_new_with_label(_("Load Plan..."));
@@ -2928,6 +3093,8 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), be_scroll, gtk_label_new(_("SS Break-Even")));
 
     priv->root_widget = outer;
+    g_object_set_data(G_OBJECT(plugin_page), "gnc-page-help-fn",
+                      reinterpret_cast<gpointer>(on_page_f1_help));
     gtk_widget_show_all(priv->root_widget);
 
     refresh_accounts_from_book(priv);
