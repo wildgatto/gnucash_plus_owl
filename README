@@ -33,6 +33,19 @@ https://wiki.gnucash.org/wiki/GnuCash
 Precompiled binaries:
 https://www.gnucash.org/download
 
+##################
+Retirement Planner
+------------------
+
+This repository (`gnucash_plus_owl`) includes a standalone, native C++/GTK3
+Retirement Planner (Tools -> Retirement Planner (Owl)...) with live GnuCash
+account mapping, 50-state + DC tax & ACA modeling, RMD projections, Roth
+conversion optimization, and Monte Carlo stress testing, inspired by
+mdlacasse/Owl (https://github.com/mdlacasse/Owl).
+
+See ATTRIBUTIONS.md and LICENSE for full upstream repository and license
+accounting.
+
 ############
 Dependencies
 ------------

@@ -17,14 +17,16 @@ John Ralls: General Development and Maintenance
 Christian Stimming: Administration
 Linas Vepstas: Administration and Website Hosting
 
-Dependencies:
-=============
+Dependencies & Inspirations:
+============================
 We'd like to acknowledge the contributions of some specialty packages
 that are incorporated into GnuCash and are critical to some of its
 features:
 Erik Colson, Bruce Schuck: Finance::Quote
 Benoit Gregoire: libofx
 Martin Preuss: AQBanking
+Martin-D. Lacasse: Owl (https://github.com/mdlacasse/Owl, inspiration for the
+  standalone Retirement Planner & tax-optimization module; see ATTRIBUTIONS.md)
 
 Early Developers:
 ----------------

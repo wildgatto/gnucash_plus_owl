@@ -57,6 +57,7 @@
 #include "gnc-plugin-register.h" /* FIXME Remove this line*/
 #include "gnc-plugin-budget.h"
 #include "gnc-plugin-business.h"
+#include "gnc-plugin-retirement.h"
 #include "gnc-plugin-page-register.h"
 #include "gnc-plugin-manager.h" /* FIXME Remove this line*/
 #include "gnc-html.h"
@@ -438,6 +439,8 @@ gnc_main_gui_init (void)
        Anyway... Oh, maybe... nah */
     gnc_plugin_manager_add_plugin (gnc_plugin_manager_get (),
                                    gnc_plugin_budget_new ());
+    gnc_plugin_manager_add_plugin (gnc_plugin_manager_get (),
+                                   gnc_plugin_retirement_new ());
     gnc_ui_hierarchy_assistant_initialize();
 
     /* Run the ui startup hooks. */

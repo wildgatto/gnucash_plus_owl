@@ -4,9 +4,13 @@
 
 
 /* Import Matcher, amount of intervention required */
-@define-color intervention-required_bg_color brown1;
-@define-color intervention-probably-required_bg_color gold;
-@define-color intervention-not-required_bg_color DarkSeaGreen1;
+@define-color intervention-required_bg_color #f8d7da;
+@define-color intervention-probably-required_bg_color #fff3cd;
+@define-color intervention-not-required_bg_color #d1e7dd;
+
+@define-color intervention-required-dark_bg_color #6e2930;
+@define-color intervention-probably-required-dark_bg_color #664d03;
+@define-color intervention-not-required-dark_bg_color #1f513b;
 
 .gnc-class-intervention-required {
   background-color: @intervention-required_bg_color;
@@ -21,49 +25,53 @@
 }
 
 .gnc-class-intervention-required-dark {
-  background-color: shade(@intervention-required_bg_color, 0.7);
+  background-color: @intervention-required-dark_bg_color;
 }
 
 .gnc-class-intervention-probably-required-dark {
-  background-color: shade(@intervention-probably-required_bg_color, 0.8);
+  background-color: @intervention-probably-required-dark_bg_color;
 }
 
 .gnc-class-intervention-not-required-dark {
-  background-color: shade(@intervention-not-required_bg_color, 0.3);
+  background-color: @intervention-not-required-dark_bg_color;
 }
 
 /* Negative value label colors */
 @define-color default-color currentColor;
-@define-color negative-numbers rgb(75%, 0%, 0%);
+@define-color negative-numbers #c01c28;
 
 /* Make some labels more important */
 .gnc-class-underline-title {
-font-size: large;
-font-weight: bold;
-text-decoration-line: underline;
+  font-size: large;
+  font-weight: 600;
+  text-decoration-line: underline;
 }
 .gnc-class-title {
-font-size: large;
-font-weight: bold;
+  font-size: large;
+  font-weight: 600;
 }
 .gnc-class-strong {
-font-weight: bold;
+  font-weight: 600;
 }
 .gnc-class-emphasis {
-font-style: italic;
+  font-style: italic;
 }
 
 /* The Dense Calendar defaults */
-@define-color primary_bg_color lavender;
-@define-color secondary_bg_color SlateGray1;
-@define-color marker_bg_color yellow;
+@define-color primary_bg_color #dbe4f0;
+@define-color secondary_bg_color #e8eef5;
+@define-color marker_bg_color #f6d32d;
+
+@define-color primary-dark_bg_color #2c3e55;
+@define-color secondary-dark_bg_color #364960;
+@define-color marker-dark_bg_color #9c7a0a;
 
 *.primary {
   background-color: @primary_bg_color;
 }
 
 *.primary-dark {
-  background-color: shade(@primary_bg_color, 0.7);
+  background-color: @primary-dark_bg_color;
 }
 
 *.secondary {
@@ -71,7 +79,7 @@ font-style: italic;
 }
 
 *.secondary-dark {
-  background-color: shade(@secondary_bg_color, 0.7);
+  background-color: @secondary-dark_bg_color;
 }
 
 *.markers {
@@ -79,5 +87,5 @@ font-style: italic;
 }
 
 *.markers-dark {
-  background-color: shade(@marker_bg_color, 0.8);
+  background-color: @marker-dark_bg_color;
 }

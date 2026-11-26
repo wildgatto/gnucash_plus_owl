@@ -69,6 +69,7 @@ set(gnucash_GRESOURCES
   ui/gnc-plugin-log-replay.ui
   ui/gnc-plugin-register.ui
   ui/gnc-plugin-report-system.ui
+  ui/gnc-plugin-retirement.ui
   ui/gnc-plugin-page-account-tree.ui
   ui/gnc-plugin-page-budget.ui
   ui/gnc-plugin-page-invoice.ui

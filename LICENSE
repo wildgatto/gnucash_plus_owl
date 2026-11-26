@@ -3,6 +3,18 @@ This software is provided under a mutually-compatible set of licenses.
 The software, for most intents and purposes, is licensed under the GNU
 General Public License, Version 2, or (at your option) Version 3.
 
+Upstream Repositories & Attributions:
+- GnuCash (https://github.com/Gnucash/gnucash): GPL-2.0-or-later.
+- Owl / Optimal Wealth Lab (https://github.com/mdlacasse/Owl, Copyright
+  Martin-D. Lacasse): Source code is GPL-3.0; documentation is
+  CC-BY-NC-SA-4.0; name, logo, and image assets are All Rights Reserved.
+  The standalone C++17 retirement planning engine and GTK3 UI in
+  gnucash/gnome/gnc-retirement-engine.* and gnucash/gnome/gnc-plugin*-retirement.*
+  are original C++17 implementations inspired by Owl's retirement planning
+  concepts, licensed under GPL-2.0-or-later (compatible with GPL-3.0),
+  without redistributing Owl assets or CC-BY-NC-SA-4.0 documentation.
+  See ATTRIBUTIONS.md for full details.
+
 Almost all of the source files are licensed under the GNU GPL, Version
 2, "or (at your option) any later version".  Some of the source files
 are licensed under "Version 2 and/or Version 3" of the GNU GPL

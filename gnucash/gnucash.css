@@ -12,23 +12,104 @@
   color: @negative-numbers;
 }
 
-/* Register Cursor settings, top, right, bottom, left */
+/* ============================================================================
+ * Main Window & Chrome
+ * ============================================================================ */
+
+#gnc-id-main-window menubar {
+  border-bottom: 1px solid alpha(currentColor, 0.08);
+}
+
+#gnc-id-main-window menubar > menuitem {
+  padding: 4px 8px;
+}
+
+#gnc-id-main-window toolbar {
+  padding: 4px 6px;
+  border-bottom: 1px solid alpha(currentColor, 0.10);
+}
+
+#gnc-id-main-window toolbar toolbutton button {
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: 1px 2px;
+  transition: background-color 150ms ease;
+}
+
+/* Modernize notebook tabs without overriding custom tab colors */
+#gnc-id-main-window notebook > header {
+  border-bottom: 1px solid alpha(currentColor, 0.10);
+}
+
+#gnc-id-main-window notebook > header tab {
+  min-height: 24px;
+  padding: 4px 10px;
+  margin: 2px 1px 0px 1px;
+  border-radius: 6px 6px 0px 0px;
+  transition: background-color 150ms ease;
+}
+
+#gnc-id-main-window notebook > header tab button {
+  min-height: 16px;
+  min-width: 16px;
+  padding: 2px;
+  margin-left: 4px;
+  border-radius: 4px;
+}
+
+/* Summary bar and status bar */
+#gnc-id-summarybar {
+  padding: 4px 8px;
+  border-top: 1px solid alpha(currentColor, 0.10);
+}
+
+#gnc-id-main-window statusbar {
+  padding: 2px 8px;
+  border-top: 1px solid alpha(currentColor, 0.08);
+}
+
+#gnc-id-main-window statusbar progressbar trough,
+#gnc-id-main-window statusbar progressbar progress {
+  min-height: 6px;
+  border-radius: 3px;
+}
+
+/* Treeview column headers */
+#gnc-id-main-window treeview header button {
+  padding: 5px 8px;
+  font-weight: 600;
+}
+
+/* ============================================================================
+ * Register Cursor & Autocomplete
+ * ============================================================================ */
+
+/* Register Cursor settings: top, right, bottom, left */
 gnc-id-cursor entry {
-  margin: 2px 5px 2px 5px;
-  padding: 0px 2px 0px 2px;
+  margin: 2px 4px 2px 4px;
+  padding: 2px 6px 2px 6px;
 }
 
 gnc-id-cursor button {
-  margin: 1px 1px 1px 1px;
+  margin: 2px 2px 2px 2px;
+  padding: 0px 4px;
+  border-radius: 4px;
 }
 
-/* Register defaults */
-@define-color register_header_bg_color #96B183;
-@define-color register_primary_bg_color #BFDEB9;
-@define-color register_secondary_bg_color #F6FFDA;
-@define-color register_split_bg_color #EDE7D3;
-@define-color register_cursor_bg_color #FFEF98;
-@define-color register_fg_color black;
+gnc-id-sheet-list {
+  border-radius: 6px;
+}
+
+/* ============================================================================
+ * Register Built-in Palette (refined modern sage & warm neutral tones)
+ * ============================================================================ */
+
+@define-color register_header_bg_color #cad8cb;
+@define-color register_primary_bg_color #e3ede4;
+@define-color register_secondary_bg_color #f6f9f6;
+@define-color register_split_bg_color #f0ece1;
+@define-color register_cursor_bg_color #fef3c7;
+@define-color register_fg_color #1e2420;
 
 *.gnc-class-register-foreground {
   color: @register_fg_color;
@@ -43,7 +124,7 @@ gnc-id-cursor button {
 }
 
 *.gnc-class-register-primary:disabled {
-  background-color: mix(@register_primary_bg_color, grey, 0.2);
+  background-color: mix(@register_primary_bg_color, #888a85, 0.2);
 }
 
 *.gnc-class-register-secondary {
@@ -51,7 +132,7 @@ gnc-id-cursor button {
 }
 
 *.gnc-class-register-secondary:disabled {
-  background-color: mix(@register_secondary_bg_color, grey, 0.2);
+  background-color: mix(@register_secondary_bg_color, #888a85, 0.2);
 }
 
 *.gnc-class-register-split {
@@ -59,35 +140,41 @@ gnc-id-cursor button {
 }
 
 *.gnc-class-register-split:disabled {
-  background-color: mix(@register_split_bg_color, grey, 0.2);
+  background-color: mix(@register_split_bg_color, #888a85, 0.2);
 }
 
 *.gnc-class-register-cursor {
   background-color: @register_cursor_bg_color;
+  border-radius: 0px;
 }
 
 *.gnc-class-register-cursor:disabled {
-  background-color: mix(@register_cursor_bg_color, grey, 0.2);
+  background-color: mix(@register_cursor_bg_color, #888a85, 0.2);
 }
 
-/* Change font color by mixing with grey */
+/* ============================================================================
+ * Semantic Text & Theme Utilities
+ * ============================================================================ */
+
+/* Change font color relative to currentColor so it adapts to light & dark themes */
 .gnc-class-lighter-grey-mix {
-  color: mix(currentColor, grey, 0.8);
+  color: alpha(currentColor, 0.55);
 }
 
 .gnc-class-darker-grey-mix {
-  color: mix(currentColor, grey, 0.2);
+  color: alpha(currentColor, 0.80);
 }
 
-/* Highlight some text */
+/* Highlight some text (Adwaita accent blue, readable on both light and dark) */
 .gnc-class-highlight {
-  color: blue;
+  color: #3584e4;
 }
 
 /* Some tweaks for the about dialog */
 dialog#GnuCash > box > box > label
 {
-  font-size: 24px;
+  font-size: 22px;
+  font-weight: 700;
 }
 
 /* Setting the Textview background for light and dark themes */

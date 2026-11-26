@@ -60,10 +60,31 @@ gnc_add_test (test-assistant-stock-transaction
   test_assistant-stock-transaction_LIBS
 )
 
+set (test_retirement_engine_SOURCES
+  gtest-retirement-engine.cpp
+  ${CMAKE_SOURCE_DIR}/gnucash/gnome/gnc-retirement-engine.cpp
+)
+
+set (test_retirement_engine_INCLUDE_DIRS
+  ${CMAKE_SOURCE_DIR}/gnucash/gnome
+)
+
+set (test_retirement_engine_LIBS
+  gtest
+  gtest_main
+)
+
+gnc_add_test (test-retirement-engine
+  "${test_retirement_engine_SOURCES}"
+  test_retirement_engine_INCLUDE_DIRS
+  test_retirement_engine_LIBS
+)
+
 set_dist_list(test_gnome_DIST
   CMakeLists.txt
   test-invoice-report-builtin-default.cpp
   ${test_gnome_scheme_SOURCES}
   ${test_gnome_SOURCES}
   ${test_assistant-stock-transaction_SOURCES}
+  gtest-retirement-engine.cpp
 )

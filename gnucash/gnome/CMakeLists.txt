@@ -42,6 +42,7 @@ set (gnc_gnome_noinst_HEADERS
   gnc-plugin-business.h
   gnc-plugin-register.h
   gnc-plugin-report-system.h
+  gnc-plugin-retirement.h
   gnc-plugin-page-account-tree.h
   gnc-plugin-page-budget.h
   gnc-plugin-page-invoice.h
@@ -50,7 +51,9 @@ set (gnc_gnome_noinst_HEADERS
   gnc-plugin-page-register-filter.hpp
   gnc-plugin-page-register-sort.hpp
   gnc-plugin-page-report.h
+  gnc-plugin-page-retirement.h
   gnc-plugin-page-sx-list.h
+  gnc-retirement-engine.hpp
   gnc-split-reg.h
   reconcile-view.h
   search-owner.h
@@ -111,6 +114,7 @@ set (gnc_gnome_SOURCES
   gnc-plugin-business.c
   gnc-plugin-register.c
   gnc-plugin-report-system.c
+  gnc-plugin-retirement.c
   gnc-plugin-page-account-tree.cpp
   gnc-plugin-page-budget.cpp
   gnc-plugin-page-invoice.cpp
@@ -118,6 +122,8 @@ set (gnc_gnome_SOURCES
   gnc-plugin-page-register.cpp
   gnc-plugin-page-register-filter.cpp
   gnc-plugin-page-register-sort.cpp
+  gnc-plugin-page-retirement.cpp
+  gnc-retirement-engine.cpp
   gnc-plugin-page-report.cpp
   gnc-plugin-page-sx-list.cpp
   gnc-split-reg.c
