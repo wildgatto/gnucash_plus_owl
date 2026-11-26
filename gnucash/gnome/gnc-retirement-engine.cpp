@@ -2049,4 +2049,377 @@ std::string export_report_html(const PlanInput& input,
     return oss.str();
 }
 
+namespace {
+
+std::string json_escape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (unsigned char c : s)
+    {
+        switch (c)
+        {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20)
+                {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                }
+                else
+                {
+                    out.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    return out;
+}
+
+// Extract a JSON string value starting at the opening quote `qpos`
+std::string parse_json_string_at(const std::string& json, size_t qpos)
+{
+    if (qpos >= json.size() || json[qpos] != '"')
+        return {};
+    std::string out;
+    for (size_t i = qpos + 1; i < json.size(); ++i)
+    {
+        char c = json[i];
+        if (c == '"')
+            return out;
+        if (c == '\\' && i + 1 < json.size())
+        {
+            char esc = json[++i];
+            switch (esc)
+            {
+                case '"':  out.push_back('"'); break;
+                case '\\': out.push_back('\\'); break;
+                case '/':  out.push_back('/'); break;
+                case 'b':  out.push_back('\b'); break;
+                case 'f':  out.push_back('\f'); break;
+                case 'n':  out.push_back('\n'); break;
+                case 'r':  out.push_back('\r'); break;
+                case 't':  out.push_back('\t'); break;
+                default:   out.push_back(esc); break;
+            }
+        }
+        else
+        {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::string find_json_string_field(const std::string& json, const std::string& key, size_t start_pos = 0)
+{
+    std::string pat = "\"" + key + "\"";
+    size_t pos = json.find(pat, start_pos);
+    while (pos != std::string::npos)
+    {
+        size_t colon = json.find(':', pos + pat.size());
+        if (colon == std::string::npos)
+            return {};
+        size_t val = colon + 1;
+        while (val < json.size() && std::isspace(static_cast<unsigned char>(json[val])))
+            ++val;
+        if (val < json.size() && json[val] == '"')
+            return parse_json_string_at(json, val);
+        pos = json.find(pat, pos + pat.size());
+    }
+    return {};
+}
+
+} // namespace
+
+std::string build_ai_plan_summary(const PlanInput& input,
+                                  const PlanResult& result)
+{
+    std::ostringstream oss;
+    oss.imbue(std::locale::classic());
+    oss << std::fixed << std::setprecision(0);
+
+    oss << "=== Anonymized Retirement Plan Summary (Today's Dollars) ===\n";
+    oss << "Primary Ages: current=" << input.current_age
+        << ", retire=" << input.retirement_age
+        << ", horizon=" << input.horizon_age << "\n";
+    if (input.has_spouse)
+    {
+        oss << "Spouse Ages: current=" << input.spouse_current_age
+            << ", retire=" << input.spouse_retirement_age
+            << ", horizon=" << input.spouse_horizon_age << "\n";
+    }
+    oss << "Filing Status: " << (input.filing_status == FilingStatus::Single ? "Single" : "MFJ")
+        << ", State: " << state_code(input.state) << "\n";
+    oss << "Initial Buckets ($): Taxable=" << input.initial_balances.taxable
+        << " (basis_pct=" << std::setprecision(2) << input.taxable_basis_pct << std::setprecision(0) << ")"
+        << ", TaxDeferred=" << input.initial_balances.tax_deferred
+        << ", Roth=" << input.initial_balances.tax_free
+        << ", HSA=" << input.initial_balances.hsa << "\n";
+    oss << "Objective: " << (input.objective == PlanObjective::MaximizeSpending ? "Maximize Spending" : "Maximize Bequest")
+        << ", TargetSpend=$" << input.target_annual_spending
+        << ", TargetBequest=$" << input.target_bequest << "\n";
+    oss << "Chosen Strategy: " << strategy_label(result.chosen_strategy)
+        << ", Chosen SS Age: " << result.chosen_ss_age
+        << (input.has_spouse ? (", Spouse SS Age: " + std::to_string(result.chosen_spouse_ss_age)) : "") << "\n";
+    oss << std::setprecision(2)
+        << "Assumptions: return=" << (input.nominal_return * 100.0) << "%"
+        << ", vol=" << (input.volatility * 100.0) << "%"
+        << ", inflation=" << (input.inflation * 100.0) << "%"
+        << ", guardrails=" << (input.enable_guardrails ? "on" : "off")
+        << ", glide_path=" << (input.enable_glide_path ? "on" : "off")
+        << ", aca=" << (input.enable_aca ? "on" : "off") << "\n"
+        << std::setprecision(0);
+    if (input.bridge_income_annual > 0.0)
+        oss << "Bridge Income: $" << input.bridge_income_annual << "/yr (ages " << input.bridge_start_age << "-" << input.bridge_end_age << ")\n";
+    if (input.debt_annual_payment > 0.0)
+        oss << "Fixed Debt: $" << input.debt_annual_payment << "/yr until age " << input.debt_payoff_age << "\n";
+    if (input.ltc_years > 0)
+        oss << "LTC Shock: $" << input.ltc_annual_cost_real << "/yr for " << input.ltc_years << " yrs starting age " << input.ltc_start_age << "\n";
+
+    oss << "\n=== Key Results ===\n";
+    oss << "Sustainable Spending/yr: $" << result.sustainable_spending_real
+        << " (Baseline: $" << result.baseline_spending_real << ")\n";
+    oss << "After-Tax Final Bequest: $" << result.final_bequest_real
+        << " (Baseline: $" << result.baseline_bequest_real << ")\n";
+    oss << "Lifetime Taxes + Healthcare: $" << result.lifetime_taxes_real
+        << " (Owl Advantage: $" << result.advantage_real << ")\n";
+    oss << std::setprecision(1)
+        << "Monte Carlo (" << result.monte_carlo.trials << " trials): "
+        << (result.monte_carlo.success_rate * 100.0) << "% success, "
+        << std::setprecision(0)
+        << "P10=$" << result.monte_carlo.p10_end_real
+        << ", P50=$" << result.monte_carlo.p50_end_real
+        << ", P90=$" << result.monte_carlo.p90_end_real << "\n";
+
+    auto hist = run_historical_backtests(
+        input, result.chosen_strategy, result.chosen_ss_age,
+        result.sustainable_spending_real, result.chosen_spouse_ss_age);
+    oss << std::setprecision(1)
+        << "Historical Backtests (1928-2024): " << (hist.rolling_success_rate * 100.0)
+        << "% success across " << hist.total_cycles << " rolling cycles\n"
+        << std::setprecision(0);
+
+    int cliff_count = 0;
+    int shortfall_count = 0;
+    for (const auto& yp : result.schedule)
+    {
+        if (yp.cliff_warning) ++cliff_count;
+        if (yp.shortfall) ++shortfall_count;
+    }
+    oss << "Schedule Flags: shortfall_years=" << shortfall_count
+        << ", irmaa_or_aca_cliff_warning_years=" << cliff_count << "\n";
+    return oss.str();
+}
+
+std::string build_ai_request_json(AiProvider provider,
+                                  const std::string& model,
+                                  const std::string& system_prompt,
+                                  const std::string& user_prompt)
+{
+    std::ostringstream oss;
+    oss.imbue(std::locale::classic());
+    if (provider == AiProvider::Ollama)
+    {
+        oss << "{\"model\":\"" << json_escape(model) << "\","
+            << "\"system\":\"" << json_escape(system_prompt) << "\","
+            << "\"prompt\":\"" << json_escape(user_prompt) << "\","
+            << "\"stream\":false}";
+    }
+    else if (provider == AiProvider::Gemini)
+    {
+        oss << "{\"system_instruction\":{\"parts\":[{\"text\":\"" << json_escape(system_prompt) << "\"}]},"
+            << "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"" << json_escape(user_prompt) << "\"}]}]}";
+    }
+    else
+    {
+        oss << "{\"model\":\"" << json_escape(model) << "\","
+            << "\"messages\":["
+            << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},"
+            << "{\"role\":\"user\",\"content\":\"" << json_escape(user_prompt) << "\"}"
+            << "]}";
+    }
+    return oss.str();
+}
+
+std::string extract_ai_response_text(AiProvider provider,
+                                     const std::string& response_json)
+{
+    if (response_json.empty())
+        return "Empty response from AI provider.";
+
+    // Check for API error message first
+    if (response_json.find("\"error\"") != std::string::npos)
+    {
+        std::string err_msg = find_json_string_field(response_json, "message");
+        if (err_msg.empty())
+            err_msg = find_json_string_field(response_json, "error");
+        if (!err_msg.empty())
+            return "AI Provider Error: " + err_msg;
+    }
+
+    if (provider == AiProvider::Ollama)
+    {
+        std::string txt = find_json_string_field(response_json, "response");
+        if (txt.empty())
+            txt = find_json_string_field(response_json, "content");
+        return txt.empty() ? response_json : txt;
+    }
+    if (provider == AiProvider::Gemini)
+    {
+        size_t cand = response_json.find("\"candidates\"");
+        std::string txt = find_json_string_field(
+            response_json, "text", (cand != std::string::npos) ? cand : 0);
+        return txt.empty() ? response_json : txt;
+    }
+    // OpenAI-compatible: choices[0].message.content
+    size_t ch = response_json.find("\"choices\"");
+    std::string txt = find_json_string_field(
+        response_json, "content", (ch != std::string::npos) ? ch : 0);
+    return txt.empty() ? response_json : txt;
+}
+
+bool parse_ai_whatif_json(const std::string& ai_text,
+                          PlanInput& in_out_plan,
+                          std::vector<std::string>& out_changes)
+{
+    out_changes.clear();
+    // Locate ```json ... ``` or last {...} object
+    std::string block;
+    size_t fence = ai_text.find("```json");
+    if (fence != std::string::npos)
+    {
+        size_t start = ai_text.find('{', fence);
+        size_t end = ai_text.find("```", fence + 7);
+        if (start != std::string::npos && end != std::string::npos && end > start)
+            block = ai_text.substr(start, end - start);
+    }
+    if (block.empty())
+    {
+        size_t b = ai_text.rfind('{');
+        size_t e = ai_text.rfind('}');
+        if (b != std::string::npos && e != std::string::npos && e > b)
+            block = ai_text.substr(b, e - b + 1);
+    }
+    if (block.empty())
+        return false;
+
+    auto read_num = [&](const char* key, double& out_val) -> bool {
+        std::string pat = std::string("\"") + key + "\"";
+        size_t p = block.find(pat);
+        if (p == std::string::npos) return false;
+        size_t c = block.find(':', p + pat.size());
+        if (c == std::string::npos) return false;
+        size_t v = c + 1;
+        while (v < block.size() && std::isspace(static_cast<unsigned char>(block[v]))) ++v;
+        if (v >= block.size()) return false;
+        try
+        {
+            size_t idx = 0;
+            out_val = std::stod(block.substr(v), &idx);
+            return idx > 0;
+        }
+        catch (...) { return false; }
+    };
+
+    auto read_bool = [&](const char* key, bool& out_val) -> bool {
+        std::string pat = std::string("\"") + key + "\"";
+        size_t p = block.find(pat);
+        if (p == std::string::npos) return false;
+        size_t c = block.find(':', p + pat.size());
+        if (c == std::string::npos) return false;
+        size_t v = c + 1;
+        while (v < block.size() && std::isspace(static_cast<unsigned char>(block[v]))) ++v;
+        if (block.compare(v, 4, "true") == 0) { out_val = true; return true; }
+        if (block.compare(v, 5, "false") == 0) { out_val = false; return true; }
+        return false;
+    };
+
+    PlanInput mod = in_out_plan;
+    double dv = 0.0;
+    bool bv = false;
+    auto fmt_i = [](const char* lbl, int a, int b) {
+        return std::string(lbl) + ": " + std::to_string(a) + " -> " + std::to_string(b);
+    };
+    auto fmt_d = [](const char* lbl, double a, double b) {
+        std::ostringstream s;
+        s.imbue(std::locale::classic());
+        s << std::fixed << std::setprecision(0) << lbl << ": $" << a << " -> $" << b;
+        return s.str();
+    };
+
+    if (read_num("retirement_age", dv))
+    {
+        int nv = std::clamp(static_cast<int>(std::llround(dv)), mod.current_age, 95);
+        if (nv != mod.retirement_age) { out_changes.push_back(fmt_i("Retirement Age", mod.retirement_age, nv)); mod.retirement_age = nv; }
+    }
+    if (read_num("horizon_age", dv))
+    {
+        int nv = std::clamp(static_cast<int>(std::llround(dv)), 65, 110);
+        if (nv != mod.horizon_age) { out_changes.push_back(fmt_i("Horizon Age", mod.horizon_age, nv)); mod.horizon_age = nv; }
+    }
+    if (read_num("ss_claim_age", dv))
+    {
+        int nv = std::clamp(static_cast<int>(std::llround(dv)), 62, 70);
+        if (nv != mod.ss_claim_age) { out_changes.push_back(fmt_i("SS Claim Age", mod.ss_claim_age, nv)); mod.ss_claim_age = nv; mod.optimize_ss_age = false; }
+    }
+    if (read_num("target_annual_spending", dv))
+    {
+        double nv = std::max(0.0, dv);
+        if (std::abs(nv - mod.target_annual_spending) > 1.0) { out_changes.push_back(fmt_d("Target Spend/yr", mod.target_annual_spending, nv)); mod.target_annual_spending = nv; }
+    }
+    if (read_num("target_bequest", dv))
+    {
+        double nv = std::max(0.0, dv);
+        if (std::abs(nv - mod.target_bequest) > 1.0) { out_changes.push_back(fmt_d("Target Bequest", mod.target_bequest, nv)); mod.target_bequest = nv; }
+    }
+    if (read_num("bridge_income_annual", dv))
+    {
+        double nv = std::max(0.0, dv);
+        if (std::abs(nv - mod.bridge_income_annual) > 1.0) { out_changes.push_back(fmt_d("Bridge Work/yr", mod.bridge_income_annual, nv)); mod.bridge_income_annual = nv; }
+    }
+    if (read_num("bridge_start_age", dv))
+    {
+        int nv = std::clamp(static_cast<int>(std::llround(dv)), 30, 95);
+        if (nv != mod.bridge_start_age) { out_changes.push_back(fmt_i("Bridge Start Age", mod.bridge_start_age, nv)); mod.bridge_start_age = nv; }
+    }
+    if (read_num("bridge_end_age", dv))
+    {
+        int nv = std::clamp(static_cast<int>(std::llround(dv)), 30, 100);
+        if (nv != mod.bridge_end_age) { out_changes.push_back(fmt_i("Bridge End Age", mod.bridge_end_age, nv)); mod.bridge_end_age = nv; }
+    }
+    if (read_bool("enable_guardrails", bv) && bv != mod.enable_guardrails)
+    {
+        out_changes.push_back(std::string("Guardrails: ") + (bv ? "ON" : "OFF"));
+        mod.enable_guardrails = bv;
+    }
+    if (read_bool("enable_glide_path", bv) && bv != mod.enable_glide_path)
+    {
+        out_changes.push_back(std::string("Glide Path: ") + (bv ? "ON" : "OFF"));
+        mod.enable_glide_path = bv;
+    }
+    if (read_num("equity_pct_in_ret", dv))
+    {
+        double nv = std::clamp(dv, 0.0, 100.0);
+        if (std::abs(nv - mod.equity_pct_in_ret) > 0.5) { out_changes.push_back(fmt_i("In-Retire Equity %", static_cast<int>(mod.equity_pct_in_ret), static_cast<int>(nv))); mod.equity_pct_in_ret = nv; }
+    }
+    if (read_num("ltc_years", dv))
+    {
+        int nv = std::clamp(static_cast<int>(std::llround(dv)), 0, 20);
+        if (nv != mod.ltc_years) { out_changes.push_back(fmt_i("LTC Years", mod.ltc_years, nv)); mod.ltc_years = nv; }
+    }
+
+    if (out_changes.empty())
+        return false;
+    mod.horizon_age = std::max(mod.retirement_age + 1, mod.horizon_age);
+    in_out_plan = mod;
+    return true;
+}
+
 } // namespace gnc::retirement

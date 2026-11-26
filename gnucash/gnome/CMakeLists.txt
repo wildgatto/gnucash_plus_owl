@@ -153,6 +153,7 @@ target_link_libraries(gnc-gnome
     gnucash-guile
     ${Boost_LIBRARIES}
     PkgConfig::GTK3
+    PkgConfig::WEBKIT
     ${GTK_MAC_LDFLAGS})
 
 target_compile_definitions (gnc-gnome PRIVATE -DG_LOG_DOMAIN=\"gnc.gui\" ${GTK_MAC_CFLAGS_OTHER})

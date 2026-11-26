@@ -29,6 +29,7 @@
 #include <gtk/gtk.h>
 #include <glib/gi18n.h>
 #include <cairo.h>
+#include <libsoup/soup.h>
 
 #include <algorithm>
 #include <cmath>
@@ -259,6 +260,19 @@ struct GncPluginPageRetirementPrivate
     bool has_snapshot = false;
     PlanInput snap_input;
     PlanResult snap_result;
+
+    // Ask Owl AI Advisor
+    GtkComboBoxText* combo_ai_provider = nullptr;
+    GtkEntry* entry_ai_endpoint = nullptr;
+    GtkEntry* entry_ai_model = nullptr;
+    GtkEntry* entry_ai_key = nullptr;
+    GtkEntry* entry_ai_question = nullptr;
+    GtkTextView* tv_ai_response = nullptr;
+    GtkLabel* lbl_ai_status = nullptr;
+    GtkWidget* btn_ai_apply = nullptr;
+    SoupSession* soup_session = nullptr;
+    bool has_ai_suggestion = false;
+    PlanInput ai_suggested_input;
 };
 
 G_DEFINE_TYPE_WITH_PRIVATE(GncPluginPageRetirement, gnc_plugin_page_retirement, GNC_TYPE_PLUGIN_PAGE)
@@ -311,6 +325,7 @@ gnc_plugin_page_retirement_init(GncPluginPageRetirement* page)
     new (&priv->last_result) PlanResult();
     new (&priv->snap_input) PlanInput();
     new (&priv->snap_result) PlanResult();
+    new (&priv->ai_suggested_input) PlanInput();
 
     gnc_plugin_page_add_book(GNC_PLUGIN_PAGE(page), gnc_get_current_book());
 }
@@ -327,6 +342,7 @@ gnc_plugin_page_retirement_finalize(GObject* object)
     priv->last_result.~PlanResult();
     priv->snap_input.~PlanInput();
     priv->snap_result.~PlanResult();
+    priv->ai_suggested_input.~PlanInput();
     G_OBJECT_CLASS(gnc_plugin_page_retirement_parent_class)->finalize(object);
 }
 
@@ -937,6 +953,16 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     else
         g_key_file_remove_key(state, STATE_GROUP_PLAN, "last_owlplan_path", nullptr);
 
+    if (priv->combo_ai_provider)
+        g_key_file_set_integer(state, STATE_GROUP_PLAN, "ai_provider",
+                               gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)));
+    if (priv->entry_ai_endpoint)
+        g_key_file_set_string(state, STATE_GROUP_PLAN, "ai_endpoint",
+                              gtk_entry_get_text(priv->entry_ai_endpoint));
+    if (priv->entry_ai_model)
+        g_key_file_set_string(state, STATE_GROUP_PLAN, "ai_model",
+                              gtk_entry_get_text(priv->entry_ai_model));
+
     g_key_file_remove_group(state, STATE_GROUP_ACCTS, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EXCLUDED, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EVENTS, nullptr);
@@ -1157,6 +1183,28 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     gtk_toggle_button_set_active(priv->btn_toggle_params, show_params);
     if (priv->left_panel)
         gtk_widget_set_visible(priv->left_panel, show_params);
+
+    if (priv->combo_ai_provider)
+        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_provider),
+                                 std::clamp(get_int("ai_provider", 0), 0, 2));
+    if (priv->entry_ai_endpoint)
+    {
+        if (gchar* ep = g_key_file_get_string(state, STATE_GROUP_PLAN, "ai_endpoint", nullptr))
+        {
+            if (ep[0] != '\0')
+                gtk_entry_set_text(priv->entry_ai_endpoint, ep);
+            g_free(ep);
+        }
+    }
+    if (priv->entry_ai_model)
+    {
+        if (gchar* md = g_key_file_get_string(state, STATE_GROUP_PLAN, "ai_model", nullptr))
+        {
+            if (md[0] != '\0')
+                gtk_entry_set_text(priv->entry_ai_model, md);
+            g_free(md);
+        }
+    }
 
     if (g_key_file_has_group(state, STATE_GROUP_ACCTS))
     {
@@ -2141,6 +2189,219 @@ on_clear_snapshot_clicked(GtkWidget*, gpointer user_data)
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
     priv->has_snapshot = false;
     populate_schedule_and_comparison(priv);
+}
+
+static void
+set_ai_response_text(GncPluginPageRetirementPrivate* priv, const std::string& text)
+{
+    if (!priv->tv_ai_response)
+        return;
+    GtkTextBuffer* buf = gtk_text_view_get_buffer(priv->tv_ai_response);
+    gtk_text_buffer_set_text(buf, text.c_str(), -1);
+}
+
+static void
+on_ai_provider_changed(GtkComboBox*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    int idx = gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider));
+    if (idx == 0)
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/generate");
+        gtk_entry_set_text(priv->entry_ai_model, "llama3.2");
+    }
+    else if (idx == 1)
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "https://generativelanguage.googleapis.com/v1beta");
+        gtk_entry_set_text(priv->entry_ai_model, "gemini-2.5-flash");
+    }
+    else
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "https://api.openai.com/v1/chat/completions");
+        gtk_entry_set_text(priv->entry_ai_model, "gpt-4o-mini");
+    }
+}
+
+struct AiCallCtx
+{
+    GncPluginPageRetirementPrivate* priv = nullptr;
+    AiProvider provider = AiProvider::Ollama;
+};
+
+static void
+on_ai_http_finished(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<AiCallCtx> ctx(static_cast<AiCallCtx*>(user_data));
+    GncPluginPageRetirementPrivate* priv = ctx->priv;
+    GError* err = nullptr;
+    GBytes* bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), res, &err);
+
+    if (!priv || !priv->root_widget)
+    {
+        if (bytes) g_bytes_unref(bytes);
+        if (err) g_error_free(err);
+        return;
+    }
+
+    if (!bytes)
+    {
+        std::string msg = std::string("Request failed: ") + (err ? err->message : "Unknown network error");
+        if (err) g_error_free(err);
+        set_ai_response_text(priv, msg);
+        if (priv->lbl_ai_status)
+            gtk_label_set_text(priv->lbl_ai_status, _("Error contacting AI provider."));
+        return;
+    }
+
+    gsize len = 0;
+    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
+    std::string resp_str(raw ? raw : "", len);
+    g_bytes_unref(bytes);
+
+    std::string reply = extract_ai_response_text(ctx->provider, resp_str);
+    set_ai_response_text(priv, reply);
+
+    PlanInput suggested = priv->last_input;
+    std::vector<std::string> changes;
+    if (parse_ai_whatif_json(reply, suggested, changes) && !changes.empty())
+    {
+        priv->ai_suggested_input = suggested;
+        priv->has_ai_suggestion = true;
+        std::string summary = "Detected What-If changes: ";
+        for (size_t i = 0; i < changes.size(); ++i)
+        {
+            if (i > 0) summary += ", ";
+            summary += changes[i];
+        }
+        if (priv->lbl_ai_status)
+            gtk_label_set_text(priv->lbl_ai_status, summary.c_str());
+        if (priv->btn_ai_apply)
+            gtk_widget_set_sensitive(priv->btn_ai_apply, TRUE);
+    }
+    else
+    {
+        priv->has_ai_suggestion = false;
+        if (priv->lbl_ai_status)
+            gtk_label_set_text(priv->lbl_ai_status, _("Ready."));
+        if (priv->btn_ai_apply)
+            gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
+    }
+}
+
+static void
+send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_question)
+{
+    if (!priv->soup_session)
+        priv->soup_session = soup_session_new();
+
+    int p_idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
+    auto provider = static_cast<AiProvider>(p_idx);
+    std::string endpoint = gtk_entry_get_text(priv->entry_ai_endpoint);
+    std::string model = gtk_entry_get_text(priv->entry_ai_model);
+    std::string api_key = gtk_entry_get_text(priv->entry_ai_key);
+    if (api_key.empty())
+    {
+        const char* env_var = (provider == AiProvider::Gemini) ? g_getenv("GEMINI_API_KEY") : g_getenv("OPENAI_API_KEY");
+        if (env_var) api_key = env_var;
+    }
+
+    if (provider != AiProvider::Ollama && api_key.empty())
+    {
+        set_ai_response_text(priv, "Please enter an API key (or set GEMINI_API_KEY / OPENAI_API_KEY), or switch Provider to Local Ollama (Offline).");
+        return;
+    }
+
+    std::string url = endpoint;
+    if (provider == AiProvider::Gemini && endpoint.find(":generateContent") == std::string::npos)
+    {
+        if (!url.empty() && url.back() == '/') url.pop_back();
+        url += "/models/" + model + ":generateContent";
+    }
+
+    std::string sys_prompt =
+        "You are an expert retirement financial planner advising on an Owl-inspired retirement projection. "
+        "Be concise, practical, and clear (not formal legal/tax advice). "
+        "Whenever the user asks a What-If question or you recommend parameter changes, include a ```json { ... } ``` block "
+        "with only the changed numeric/boolean fields from: retirement_age, horizon_age, ss_claim_age, target_annual_spending, "
+        "target_bequest, bridge_income_annual, bridge_start_age, bridge_end_age, enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
+    std::string full_prompt = build_ai_plan_summary(priv->last_input, priv->last_result)
+                            + "\n=== User Question ===\n" + user_question;
+    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt);
+
+    SoupMessage* msg = soup_message_new("POST", url.c_str());
+    if (!msg)
+    {
+        set_ai_response_text(priv, "Invalid endpoint URL: " + url);
+        return;
+    }
+
+    if (provider == AiProvider::Gemini)
+        soup_message_headers_append(soup_message_get_request_headers(msg), "x-goog-api-key", api_key.c_str());
+    else if (provider == AiProvider::OpenAICompatible && !api_key.empty())
+    {
+        std::string auth = "Bearer " + api_key;
+        soup_message_headers_append(soup_message_get_request_headers(msg), "Authorization", auth.c_str());
+    }
+
+    GBytes* req_bytes = g_bytes_new(body.data(), body.size());
+    soup_message_set_request_body_from_bytes(msg, "application/json", req_bytes);
+    g_bytes_unref(req_bytes);
+
+    priv->has_ai_suggestion = false;
+    if (priv->btn_ai_apply)
+        gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
+    if (priv->lbl_ai_status)
+        gtk_label_set_text(priv->lbl_ai_status, _("Contacting AI advisor..."));
+    set_ai_response_text(priv, "Thinking...");
+
+    auto* ctx = new AiCallCtx{priv, provider};
+    soup_session_send_and_read_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, nullptr,
+                                     on_ai_http_finished, ctx);
+    g_object_unref(msg);
+}
+
+static void
+on_ai_critique_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    send_ai_prompt(priv, "Critique my current retirement plan: highlight strengths, IRMAA/ACA cliff or sequence-of-returns risks, and suggest 1-2 concrete What-If improvements.");
+}
+
+static void
+on_ai_ask_clicked(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    std::string q = priv->entry_ai_question ? gtk_entry_get_text(priv->entry_ai_question) : "";
+    if (q.empty())
+        q = "What is the biggest risk in my plan and how can I improve it?";
+    send_ai_prompt(priv, q);
+}
+
+static void
+on_ai_copy_summary_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    std::string summary = build_ai_plan_summary(priv->last_input, priv->last_result);
+    GtkClipboard* cb = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    gtk_clipboard_set_text(cb, summary.c_str(), -1);
+    if (priv->lbl_ai_status)
+        gtk_label_set_text(priv->lbl_ai_status, _("Copied anonymized summary to clipboard."));
+}
+
+static void
+on_ai_apply_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (!priv->has_ai_suggestion)
+        return;
+    apply_plan_input_to_ui(priv, priv->ai_suggested_input);
+    save_state_to_book(priv);
+    run_planner(priv);
+    priv->has_ai_suggestion = false;
+    if (priv->btn_ai_apply)
+        gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
+    if (priv->lbl_ai_status)
+        gtk_label_set_text(priv->lbl_ai_status, _("Applied AI What-If parameters and re-optimized."));
 }
 
 static void
@@ -3284,6 +3545,86 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_container_add(GTK_CONTAINER(be_scroll), be_tv);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), be_scroll, gtk_label_new(_("SS Break-Even")));
 
+    // Tab 7: Ask Owl AI (Advisor & What-If Assistant)
+    GtkWidget* tab_ai = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_set_border_width(GTK_CONTAINER(tab_ai), 8);
+
+    GtkWidget* ai_cfg = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(ai_cfg), 4);
+    gtk_grid_set_column_spacing(GTK_GRID(ai_cfg), 6);
+
+    priv->combo_ai_provider = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(priv->combo_ai_provider, _("Local Ollama (Offline)"));
+    gtk_combo_box_text_append_text(priv->combo_ai_provider, _("Google Gemini"));
+    gtk_combo_box_text_append_text(priv->combo_ai_provider, _("OpenAI-Compatible"));
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_provider), 0);
+    g_signal_connect(priv->combo_ai_provider, "changed", G_CALLBACK(on_ai_provider_changed), priv);
+
+    priv->entry_ai_endpoint = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/generate");
+    gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ai_endpoint), TRUE);
+
+    priv->entry_ai_model = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_text(priv->entry_ai_model, "llama3.2");
+
+    priv->entry_ai_key = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_visibility(priv->entry_ai_key, FALSE);
+    gtk_entry_set_placeholder_text(priv->entry_ai_key, _("Optional for Ollama; or set GEMINI_API_KEY / OPENAI_API_KEY"));
+
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Provider")), 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->combo_ai_provider), 1, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Model")), 2, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_model), 3, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Endpoint")), 0, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_endpoint), 1, 1, 3, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("API Key")), 0, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_key), 1, 2, 3, 1);
+    gtk_box_pack_start(GTK_BOX(tab_ai), ai_cfg, FALSE, FALSE, 0);
+
+    GtkWidget* ai_qbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    priv->entry_ai_question = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(priv->entry_ai_question, _("Ask a What-If question (e.g. 'What if I retire at 62 and take SS at 70?')"));
+    g_signal_connect(priv->entry_ai_question, "activate", G_CALLBACK(on_ai_ask_clicked), priv);
+    GtkWidget* btn_ai_ask = gtk_button_new_with_label(_("Ask Owl AI"));
+    gtk_style_context_add_class(gtk_widget_get_style_context(btn_ai_ask), "suggested-action");
+    g_signal_connect(btn_ai_ask, "clicked", G_CALLBACK(on_ai_ask_clicked), priv);
+    GtkWidget* btn_ai_critique = gtk_button_new_with_label(_("Critique My Plan"));
+    g_signal_connect(btn_ai_critique, "clicked", G_CALLBACK(on_ai_critique_clicked), priv);
+    GtkWidget* btn_ai_copy = gtk_button_new_with_label(_("Copy Summary"));
+    g_signal_connect(btn_ai_copy, "clicked", G_CALLBACK(on_ai_copy_summary_clicked), priv);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), GTK_WIDGET(priv->entry_ai_question), TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), btn_ai_ask, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), btn_ai_critique, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), btn_ai_copy, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tab_ai), ai_qbar, FALSE, FALSE, 0);
+
+    priv->tv_ai_response = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(priv->tv_ai_response, FALSE);
+    gtk_text_view_set_wrap_mode(priv->tv_ai_response, GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(priv->tv_ai_response, 8);
+    gtk_text_view_set_right_margin(priv->tv_ai_response, 8);
+    gtk_text_view_set_top_margin(priv->tv_ai_response, 6);
+    set_ai_response_text(priv, "Privacy-first AI Advisor: Only an anonymized numeric summary (no account names or PII) is sent.\n"
+                               "Click 'Critique My Plan' or ask a What-If question above.");
+    GtkWidget* ai_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ai_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(ai_scroll), GTK_WIDGET(priv->tv_ai_response));
+    gtk_box_pack_start(GTK_BOX(tab_ai), ai_scroll, TRUE, TRUE, 0);
+
+    GtkWidget* ai_foot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    priv->lbl_ai_status = GTK_LABEL(gtk_label_new(_("Ready.")));
+    gtk_widget_set_halign(GTK_WIDGET(priv->lbl_ai_status), GTK_ALIGN_START);
+    gtk_label_set_ellipsize(priv->lbl_ai_status, PANGO_ELLIPSIZE_END);
+    priv->btn_ai_apply = gtk_button_new_with_label(_("Apply Suggested Changes"));
+    gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
+    g_signal_connect(priv->btn_ai_apply, "clicked", G_CALLBACK(on_ai_apply_clicked), priv);
+    gtk_box_pack_start(GTK_BOX(ai_foot), GTK_WIDGET(priv->lbl_ai_status), TRUE, TRUE, 0);
+    gtk_box_pack_end(GTK_BOX(ai_foot), priv->btn_ai_apply, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tab_ai), ai_foot, FALSE, FALSE, 0);
+
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ai, gtk_label_new(_("Ask Owl AI")));
+
     priv->root_widget = outer;
     g_object_set_data(G_OBJECT(plugin_page), "gnc-page-help-fn",
                       reinterpret_cast<gpointer>(on_page_f1_help));
@@ -3327,6 +3668,12 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         g_object_unref(priv->sens_store);
         g_object_unref(priv->hist_store);
         g_object_unref(priv->ss_be_store);
+        if (priv->soup_session)
+            g_object_unref(priv->soup_session);
+        priv->soup_session = nullptr;
+        priv->tv_ai_response = nullptr;
+        priv->lbl_ai_status = nullptr;
+        priv->btn_ai_apply = nullptr;
         priv->sched_store = nullptr;
         priv->cmp_store = nullptr;
         priv->acct_filter = nullptr;

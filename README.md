@@ -51,6 +51,7 @@ Available under **Tools → Retirement Planner (Owl)...**, this standalone modul
   - **5 Chart Modes with Hover Tooltips:** `Portfolio by Tax Bucket`, `Income & Withdrawals`, `Taxes, RMDs & Roth Conv`, `Monte Carlo Fan (P10–P90)`, and `Tax & Healthcare Breakdown`.
   - **Stress & Sensitivity Tab:** Sequence-of-returns stress scenarios (Early Crash, Lost Decade, Stagflation), a 5×5 Return vs. Spending sensitivity matrix, and **Historical Market Backtests (1928–2024)** across 97 rolling cycles.
   - **SS Break-Even Tab:** Cumulative Social Security benefits across claiming ages `62–70` with break-even ages vs. 62 and 67.
+  - **Ask Owl AI Tab:** Privacy-first AI Retirement Advisor supporting **Local Ollama (Offline)**, **Google Gemini**, and **OpenAI-Compatible** endpoints, with anonymized plan critiques, What-If Q&A, and 1-click parameter apply.
 
 ---
 

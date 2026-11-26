@@ -649,3 +649,34 @@ TEST(RetirementEngine, BridgeIncomeHeirTaxRateLookbackAndRichHtml)
     EXPECT_EQ(rt.bridge_end_age, 65);
     EXPECT_DOUBLE_EQ(rt.heir_tax_rate, 0.28);
 }
+
+TEST(RetirementEngine, AiSummaryRequestResponseAndWhatIfParser)
+{
+    PlanInput in;
+    in.current_age = 58;
+    in.retirement_age = 65;
+    in.horizon_age = 90;
+    in.initial_balances.taxable = 300000.0;
+    in.initial_balances.tax_deferred = 700000.0;
+    in.monte_carlo_trials = 15;
+
+    PlanResult res = optimize_plan(in);
+    std::string summary = build_ai_plan_summary(in, res);
+    EXPECT_NE(summary.find("Anonymized Retirement Plan Summary"), std::string::npos);
+    EXPECT_NE(summary.find("TaxDeferred=700000"), std::string::npos);
+
+    std::string ol_req = build_ai_request_json(AiProvider::Ollama, "llama3.2", "sys", "hello\nworld");
+    EXPECT_NE(ol_req.find("\"model\":\"llama3.2\""), std::string::npos);
+    EXPECT_NE(ol_req.find("\\nworld"), std::string::npos);
+
+    std::string gem_resp = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Try retiring at 62.\\n```json\\n{\\\"retirement_age\\\": 62, \\\"enable_guardrails\\\": true}\\n```\"}]}}]}";
+    std::string extracted = extract_ai_response_text(AiProvider::Gemini, gem_resp);
+    EXPECT_NE(extracted.find("Try retiring at 62."), std::string::npos);
+
+    PlanInput mod = in;
+    std::vector<std::string> changes;
+    ASSERT_TRUE(parse_ai_whatif_json(extracted, mod, changes));
+    EXPECT_EQ(mod.retirement_age, 62);
+    EXPECT_TRUE(mod.enable_guardrails);
+    EXPECT_EQ(changes.size(), 2u);
+}

@@ -438,6 +438,32 @@ std::string export_schedule_csv(const PlanInput& input,
 std::string export_report_html(const PlanInput& input,
                                const PlanResult& result);
 
+enum class AiProvider
+{
+    Ollama = 0,
+    Gemini = 1,
+    OpenAICompatible = 2
+};
+
+/** Build a privacy-safe, anonymized numeric summary of the plan and results for AI analysis. */
+std::string build_ai_plan_summary(const PlanInput& input,
+                                  const PlanResult& result);
+
+/** Build a provider-specific JSON request body for Ollama, Gemini, or OpenAI-compatible APIs. */
+std::string build_ai_request_json(AiProvider provider,
+                                  const std::string& model,
+                                  const std::string& system_prompt,
+                                  const std::string& user_prompt);
+
+/** Extract assistant text from a provider JSON response (returns error message if unparseable). */
+std::string extract_ai_response_text(AiProvider provider,
+                                     const std::string& response_json);
+
+/** Parse a JSON What-If parameter block from AI text into PlanInput and list human-readable changes. */
+bool parse_ai_whatif_json(const std::string& ai_text,
+                          PlanInput& in_out_plan,
+                          std::vector<std::string>& out_changes);
+
 /** Compute state income tax for a single year. */
 double compute_state_tax(USState st,
                          double ordinary_non_ss,
