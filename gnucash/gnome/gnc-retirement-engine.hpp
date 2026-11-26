@@ -453,11 +453,18 @@ std::string build_ai_plan_summary(const PlanInput& input,
 std::string build_ai_request_json(AiProvider provider,
                                   const std::string& model,
                                   const std::string& system_prompt,
-                                  const std::string& user_prompt);
+                                  const std::string& user_prompt,
+                                  bool stream = false,
+                                  int num_ctx = 1024,
+                                  int max_tokens = 384);
 
 /** Extract assistant text from a provider JSON response (returns error message if unparseable). */
 std::string extract_ai_response_text(AiProvider provider,
                                      const std::string& response_json);
+
+/** Extract incremental token text from a single NDJSON or SSE streaming line. */
+std::string extract_ai_stream_line(AiProvider provider,
+                                   const std::string& line);
 
 /** Extract available model IDs/names from a provider's model-list JSON response. */
 std::vector<std::string> extract_ai_models_list(AiProvider provider,

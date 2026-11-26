@@ -271,7 +271,9 @@ struct GncPluginPageRetirementPrivate
     GtkTextView* tv_ai_response = nullptr;
     GtkLabel* lbl_ai_status = nullptr;
     GtkWidget* btn_ai_apply = nullptr;
+    GtkWidget* btn_ai_stop = nullptr;
     SoupSession* soup_session = nullptr;
+    GCancellable* ai_cancel = nullptr;
     bool has_ai_suggestion = false;
     PlanInput ai_suggested_input;
 };
@@ -2207,8 +2209,8 @@ ensure_soup_session(GncPluginPageRetirementPrivate* priv)
     if (!priv->soup_session)
     {
         priv->soup_session = soup_session_new();
-        soup_session_set_timeout(priv->soup_session, 180);
-        soup_session_set_idle_timeout(priv->soup_session, 180);
+        soup_session_set_timeout(priv->soup_session, 600);
+        soup_session_set_idle_timeout(priv->soup_session, 600);
     }
 }
 
@@ -2364,41 +2366,70 @@ on_ai_refresh_models_clicked(GtkButton*, gpointer user_data)
 }
 
 static void
-on_ai_http_finished(GObject* source, GAsyncResult* res, gpointer user_data)
+append_ai_response_text(GncPluginPageRetirementPrivate* priv, const std::string& token)
 {
-    std::unique_ptr<AiCallCtx> ctx(static_cast<AiCallCtx*>(user_data));
+    if (!priv->tv_ai_response || token.empty())
+        return;
+    GtkTextBuffer* buf = gtk_text_view_get_buffer(priv->tv_ai_response);
+    GtkTextIter end_it;
+    gtk_text_buffer_get_end_iter(buf, &end_it);
+    gtk_text_buffer_insert(buf, &end_it, token.c_str(), static_cast<gint>(token.size()));
+    gtk_text_view_scroll_to_iter(priv->tv_ai_response, &end_it, 0.0, FALSE, 0.0, 1.0);
+}
+
+struct AiStreamCtx
+{
+    GncPluginPageRetirementPrivate* priv = nullptr;
+    AiProvider provider = AiProvider::Ollama;
+    GInputStream* stream = nullptr;
+    std::string line_buf;
+    std::string full_reply;
+    bool cleared_thinking = false;
+};
+
+static void
+finish_ai_stream(std::unique_ptr<AiStreamCtx> ctx, const char* err_msg = nullptr)
+{
     GncPluginPageRetirementPrivate* priv = ctx->priv;
-    GError* err = nullptr;
-    GBytes* bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), res, &err);
-
+    if (ctx->stream)
+        g_object_unref(ctx->stream);
     if (!priv || !priv->root_widget)
-    {
-        if (bytes) g_bytes_unref(bytes);
-        if (err) g_error_free(err);
         return;
-    }
 
-    if (!bytes)
+    if (priv->btn_ai_stop)
+        gtk_widget_set_sensitive(priv->btn_ai_stop, FALSE);
+
+    if (err_msg)
     {
-        std::string msg = std::string("Request failed: ") + (err ? err->message : "Unknown network error");
-        if (err) g_error_free(err);
-        set_ai_response_text(priv, msg);
+        if (!ctx->cleared_thinking)
+            set_ai_response_text(priv, err_msg);
+        else
+            append_ai_response_text(priv, std::string("\n[") + err_msg + "]");
         if (priv->lbl_ai_status)
-            gtk_label_set_text(priv->lbl_ai_status, _("Error contacting AI provider."));
+            gtk_label_set_text(priv->lbl_ai_status, _("Error or cancelled."));
         return;
     }
 
-    gsize len = 0;
-    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
-    std::string resp_str(raw ? raw : "", len);
-    g_bytes_unref(bytes);
-
-    std::string reply = extract_ai_response_text(ctx->provider, resp_str);
-    set_ai_response_text(priv, reply);
+    if (!ctx->line_buf.empty())
+    {
+        std::string tok = extract_ai_stream_line(ctx->provider, ctx->line_buf);
+        if (!tok.empty())
+        {
+            if (!ctx->cleared_thinking) { set_ai_response_text(priv, ""); ctx->cleared_thinking = true; }
+            ctx->full_reply += tok;
+            append_ai_response_text(priv, tok);
+        }
+        else if (ctx->full_reply.empty())
+        {
+            std::string fallback = extract_ai_response_text(ctx->provider, ctx->line_buf);
+            set_ai_response_text(priv, fallback);
+            ctx->full_reply = fallback;
+        }
+    }
 
     PlanInput suggested = priv->last_input;
     std::vector<std::string> changes;
-    if (parse_ai_whatif_json(reply, suggested, changes) && !changes.empty())
+    if (parse_ai_whatif_json(ctx->full_reply, suggested, changes) && !changes.empty())
     {
         priv->ai_suggested_input = suggested;
         priv->has_ai_suggestion = true;
@@ -2417,16 +2448,117 @@ on_ai_http_finished(GObject* source, GAsyncResult* res, gpointer user_data)
     {
         priv->has_ai_suggestion = false;
         if (priv->lbl_ai_status)
-            gtk_label_set_text(priv->lbl_ai_status, _("Ready."));
+            gtk_label_set_text(priv->lbl_ai_status, _("Done."));
         if (priv->btn_ai_apply)
             gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
     }
 }
 
 static void
+on_ai_stream_read(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<AiStreamCtx> ctx(static_cast<AiStreamCtx*>(user_data));
+    GncPluginPageRetirementPrivate* priv = ctx->priv;
+    GError* err = nullptr;
+    GBytes* bytes = g_input_stream_read_bytes_finish(G_INPUT_STREAM(source), res, &err);
+
+    if (!priv || !priv->root_widget)
+    {
+        if (bytes) g_bytes_unref(bytes);
+        if (err) g_error_free(err);
+        return;
+    }
+
+    if (!bytes)
+    {
+        std::string msg = std::string("Stream failed: ") + (err ? err->message : "Unknown error");
+        if (err) g_error_free(err);
+        finish_ai_stream(std::move(ctx), msg.c_str());
+        return;
+    }
+
+    gsize len = 0;
+    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
+    if (len == 0)
+    {
+        g_bytes_unref(bytes);
+        finish_ai_stream(std::move(ctx));
+        return;
+    }
+
+    ctx->line_buf.append(raw, len);
+    g_bytes_unref(bytes);
+
+    size_t nl = 0;
+    while ((nl = ctx->line_buf.find('\n')) != std::string::npos)
+    {
+        std::string line = ctx->line_buf.substr(0, nl);
+        ctx->line_buf.erase(0, nl + 1);
+        std::string tok = extract_ai_stream_line(ctx->provider, line);
+        if (!tok.empty())
+        {
+            if (!ctx->cleared_thinking)
+            {
+                set_ai_response_text(priv, "");
+                ctx->cleared_thinking = true;
+                if (priv->lbl_ai_status)
+                    gtk_label_set_text(priv->lbl_ai_status, _("Streaming response..."));
+            }
+            ctx->full_reply += tok;
+            append_ai_response_text(priv, tok);
+        }
+    }
+
+    g_input_stream_read_bytes_async(ctx->stream, 4096, G_PRIORITY_DEFAULT,
+                                    priv->ai_cancel, on_ai_stream_read, ctx.release());
+}
+
+static void
+on_ai_send_opened(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<AiStreamCtx> ctx(static_cast<AiStreamCtx*>(user_data));
+    GncPluginPageRetirementPrivate* priv = ctx->priv;
+    GError* err = nullptr;
+    GInputStream* in_stream = soup_session_send_finish(SOUP_SESSION(source), res, &err);
+
+    if (!priv || !priv->root_widget)
+    {
+        if (in_stream) g_object_unref(in_stream);
+        if (err) g_error_free(err);
+        return;
+    }
+
+    if (!in_stream)
+    {
+        std::string msg = std::string("Request failed: ") + (err ? err->message : "Unknown network error");
+        if (err) g_error_free(err);
+        finish_ai_stream(std::move(ctx), msg.c_str());
+        return;
+    }
+
+    ctx->stream = in_stream;
+    g_input_stream_read_bytes_async(ctx->stream, 4096, G_PRIORITY_DEFAULT,
+                                    priv->ai_cancel, on_ai_stream_read, ctx.release());
+}
+
+static void
+on_ai_stop_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (priv->ai_cancel)
+        g_cancellable_cancel(priv->ai_cancel);
+}
+
+static void
 send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_question)
 {
     ensure_soup_session(priv);
+    if (priv->ai_cancel)
+    {
+        g_cancellable_cancel(priv->ai_cancel);
+        g_object_unref(priv->ai_cancel);
+    }
+    priv->ai_cancel = g_cancellable_new();
 
     int p_idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
     auto provider = static_cast<AiProvider>(p_idx);
@@ -2446,21 +2578,20 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
     }
 
     std::string url = endpoint;
-    if (provider == AiProvider::Gemini && endpoint.find(":generateContent") == std::string::npos)
+    if (provider == AiProvider::Gemini && endpoint.find(":streamGenerateContent") == std::string::npos)
     {
         if (!url.empty() && url.back() == '/') url.pop_back();
-        url += "/models/" + model + ":generateContent";
+        url += "/models/" + model + ":streamGenerateContent?alt=sse";
     }
 
     std::string sys_prompt =
-        "You are an expert retirement financial planner advising on an Owl-inspired retirement projection. "
-        "Be concise, practical, and clear (not formal legal/tax advice). "
-        "Whenever the user asks a What-If question or you recommend parameter changes, include a ```json { ... } ``` block "
-        "with only the changed numeric/boolean fields from: retirement_age, horizon_age, ss_claim_age, target_annual_spending, "
-        "target_bequest, bridge_income_annual, bridge_start_age, bridge_end_age, enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
+        "Concise retirement advisor. Give 3-5 short bullets. "
+        "For What-If or parameter changes, include ```json {...} ``` using only changed keys from: "
+        "retirement_age, horizon_age, ss_claim_age, target_annual_spending, target_bequest, "
+        "bridge_income_annual, enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
     std::string full_prompt = build_ai_plan_summary(priv->last_input, priv->last_result)
-                            + "\n=== User Question ===\n" + user_question;
-    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt);
+                            + "\nQuestion: " + user_question;
+    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, true, 1024, 384);
 
     SoupMessage* msg = soup_message_new("POST", url.c_str());
     if (!msg)
@@ -2484,13 +2615,15 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
     priv->has_ai_suggestion = false;
     if (priv->btn_ai_apply)
         gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
+    if (priv->btn_ai_stop)
+        gtk_widget_set_sensitive(priv->btn_ai_stop, TRUE);
     if (priv->lbl_ai_status)
-        gtk_label_set_text(priv->lbl_ai_status, _("Contacting AI advisor..."));
-    set_ai_response_text(priv, "Thinking...");
+        gtk_label_set_text(priv->lbl_ai_status, _("Connecting / loading model..."));
+    set_ai_response_text(priv, "Thinking (streaming tokens)...");
 
-    auto* ctx = new AiCallCtx{priv, provider};
-    soup_session_send_and_read_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, nullptr,
-                                     on_ai_http_finished, ctx);
+    auto* ctx = new AiStreamCtx{priv, provider};
+    soup_session_send_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, priv->ai_cancel,
+                            on_ai_send_opened, ctx);
     g_object_unref(msg);
 }
 
@@ -3757,8 +3890,12 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     priv->btn_ai_apply = gtk_button_new_with_label(_("Apply Suggested Changes"));
     gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
     g_signal_connect(priv->btn_ai_apply, "clicked", G_CALLBACK(on_ai_apply_clicked), priv);
+    priv->btn_ai_stop = gtk_button_new_with_label(_("Stop"));
+    gtk_widget_set_sensitive(priv->btn_ai_stop, FALSE);
+    g_signal_connect(priv->btn_ai_stop, "clicked", G_CALLBACK(on_ai_stop_clicked), priv);
     gtk_box_pack_start(GTK_BOX(ai_foot), GTK_WIDGET(priv->lbl_ai_status), TRUE, TRUE, 0);
     gtk_box_pack_end(GTK_BOX(ai_foot), priv->btn_ai_apply, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(ai_foot), priv->btn_ai_stop, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(tab_ai), ai_foot, FALSE, FALSE, 0);
 
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ai, gtk_label_new(_("Ask Owl AI")));
@@ -3806,6 +3943,12 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         g_object_unref(priv->sens_store);
         g_object_unref(priv->hist_store);
         g_object_unref(priv->ss_be_store);
+        if (priv->ai_cancel)
+        {
+            g_cancellable_cancel(priv->ai_cancel);
+            g_object_unref(priv->ai_cancel);
+            priv->ai_cancel = nullptr;
+        }
         if (priv->soup_session)
             g_object_unref(priv->soup_session);
         priv->soup_session = nullptr;

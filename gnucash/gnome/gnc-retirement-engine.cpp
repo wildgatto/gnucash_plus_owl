@@ -2221,7 +2221,10 @@ std::string build_ai_plan_summary(const PlanInput& input,
 std::string build_ai_request_json(AiProvider provider,
                                   const std::string& model,
                                   const std::string& system_prompt,
-                                  const std::string& user_prompt)
+                                  const std::string& user_prompt,
+                                  bool stream,
+                                  int num_ctx,
+                                  int max_tokens)
 {
     std::ostringstream oss;
     oss.imbue(std::locale::classic());
@@ -2230,22 +2233,68 @@ std::string build_ai_request_json(AiProvider provider,
         oss << "{\"model\":\"" << json_escape(model) << "\","
             << "\"system\":\"" << json_escape(system_prompt) << "\","
             << "\"prompt\":\"" << json_escape(user_prompt) << "\","
-            << "\"stream\":false}";
+            << "\"stream\":" << (stream ? "true" : "false") << ","
+            << "\"options\":{\"num_ctx\":" << num_ctx << ",\"num_predict\":" << max_tokens << "}}";
     }
     else if (provider == AiProvider::Gemini)
     {
         oss << "{\"system_instruction\":{\"parts\":[{\"text\":\"" << json_escape(system_prompt) << "\"}]},"
-            << "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"" << json_escape(user_prompt) << "\"}]}]}";
+            << "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"" << json_escape(user_prompt) << "\"}]}],"
+            << "\"generationConfig\":{\"maxOutputTokens\":" << max_tokens << "}}";
     }
     else
     {
         oss << "{\"model\":\"" << json_escape(model) << "\","
+            << "\"stream\":" << (stream ? "true" : "false") << ","
+            << "\"max_tokens\":" << max_tokens << ","
             << "\"messages\":["
             << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},"
             << "{\"role\":\"user\",\"content\":\"" << json_escape(user_prompt) << "\"}"
             << "]}";
     }
     return oss.str();
+}
+
+std::string extract_ai_stream_line(AiProvider provider,
+                                   const std::string& line)
+{
+    std::string s = line;
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' '))
+        s.pop_back();
+    if (s.empty())
+        return {};
+    if (s.rfind("data:", 0) == 0)
+    {
+        s = s.substr(5);
+        size_t first = s.find_first_not_of(" \t");
+        if (first == std::string::npos) return {};
+        s = s.substr(first);
+    }
+    if (s == "[DONE]")
+        return {};
+    if (s.find("\"error\"") != std::string::npos)
+    {
+        std::string err = find_json_string_field(s, "message");
+        if (err.empty()) err = find_json_string_field(s, "error");
+        if (!err.empty()) return "\n[Error: " + err + "]";
+    }
+
+    if (provider == AiProvider::Ollama)
+    {
+        std::string tok = find_json_string_field(s, "response");
+        if (tok.empty()) tok = find_json_string_field(s, "content");
+        return tok;
+    }
+    if (provider == AiProvider::Gemini)
+    {
+        size_t cand = s.find("\"candidates\"");
+        return find_json_string_field(s, "text", (cand != std::string::npos) ? cand : 0);
+    }
+    size_t delta = s.find("\"delta\"");
+    if (delta != std::string::npos)
+        return find_json_string_field(s, "content", delta);
+    size_t ch = s.find("\"choices\"");
+    return find_json_string_field(s, "content", (ch != std::string::npos) ? ch : 0);
 }
 
 std::string extract_ai_response_text(AiProvider provider,

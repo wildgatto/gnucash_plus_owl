@@ -687,4 +687,10 @@ TEST(RetirementEngine, AiSummaryRequestResponseAndWhatIfParser)
     auto gem_models = extract_ai_models_list(AiProvider::Gemini, "{\"models\":[{\"name\":\"models/gemini-2.5-flash\"},{\"name\":\"models/embedding-001\"}]}");
     ASSERT_EQ(gem_models.size(), 1u);
     EXPECT_EQ(gem_models[0], "gemini-2.5-flash");
+
+    // Streaming NDJSON / SSE line parsing
+    EXPECT_EQ(extract_ai_stream_line(AiProvider::Ollama, "{\"response\":\"Hello\",\"done\":false}"), "Hello");
+    EXPECT_EQ(extract_ai_stream_line(AiProvider::OpenAICompatible, "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}"), " world");
+    EXPECT_EQ(extract_ai_stream_line(AiProvider::OpenAICompatible, "data: [DONE]"), "");
+    EXPECT_EQ(extract_ai_stream_line(AiProvider::Gemini, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"!\"}]}}]}"), "!");
 }
