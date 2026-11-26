@@ -787,11 +787,21 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     g_key_file_remove_group(state, STATE_GROUP_ACCTS, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EXCLUDED, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EVENTS, nullptr);
-    for (const auto& a : priv->accounts)
+    size_t excl_idx = 0;
+    for (size_t i = 0; i < priv->accounts.size(); ++i)
     {
-        g_key_file_set_string(state, STATE_GROUP_ACCTS, a.full_name.c_str(), bucket_label(a.bucket));
+        const auto& a = priv->accounts[i];
+        char akey[32];
+        std::snprintf(akey, sizeof(akey), "acct_%zu", i);
+        std::string aval = std::string(a.included ? "1" : "0") + "|" + bucket_label(a.bucket) + "|" + a.full_name;
+        g_key_file_set_string(state, STATE_GROUP_ACCTS, akey, aval.c_str());
+
         if (!a.included)
-            g_key_file_set_boolean(state, STATE_GROUP_EXCLUDED, a.full_name.c_str(), TRUE);
+        {
+            char ekey[32];
+            std::snprintf(ekey, sizeof(ekey), "excl_%zu", excl_idx++);
+            g_key_file_set_string(state, STATE_GROUP_EXCLUDED, ekey, a.full_name.c_str());
+        }
     }
     for (size_t i = 0; i < priv->events.size(); ++i)
     {
@@ -807,7 +817,18 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     if (flush_to_disk && gnc_current_session_exist())
     {
         if (QofSession* sess = gnc_get_current_session())
+        {
+            if (!g_key_file_has_group(state, "Top"))
+            {
+                if (QofBook* book = qof_session_get_book(sess))
+                {
+                    gchar guid_str[GUID_ENCODING_LENGTH + 1];
+                    guid_to_string_buff(qof_entity_get_guid(QOF_INSTANCE(book)), guid_str);
+                    g_key_file_set_string(state, "Top", "BookGuid", guid_str);
+                }
+            }
             gnc_state_save(sess);
+        }
     }
 }
 
@@ -941,31 +962,80 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
         gsize nkeys = 0;
         gchar** keys = g_key_file_get_keys(state, STATE_GROUP_ACCTS, &nkeys, nullptr);
         std::vector<std::pair<std::string, TaxBucket>> overrides;
+        std::vector<std::string> excluded;
         for (gsize i = 0; keys && i < nkeys; ++i)
         {
             gchar* val = g_key_file_get_string(state, STATE_GROUP_ACCTS, keys[i], nullptr);
             if (val)
             {
-                overrides.emplace_back(keys[i], bucket_from_label(val));
+                std::string s(val);
+                if (g_str_has_prefix(keys[i], "acct_"))
+                {
+                    size_t p1 = s.find('|');
+                    size_t p2 = (p1 != std::string::npos) ? s.find('|', p1 + 1) : std::string::npos;
+                    if (p1 != std::string::npos && p2 != std::string::npos)
+                    {
+                        bool inc = (s.substr(0, p1) != "0");
+                        TaxBucket tb = bucket_from_label(s.substr(p1 + 1, p2 - p1 - 1));
+                        std::string name = s.substr(p2 + 1);
+                        overrides.emplace_back(name, tb);
+                        if (!inc)
+                            excluded.push_back(name);
+                    }
+                }
+                else
+                {
+                    overrides.emplace_back(keys[i], bucket_from_label(s));
+                }
                 g_free(val);
             }
         }
         g_strfreev(keys);
-        apply_account_overrides_to_ui(priv, overrides);
+        apply_account_overrides_to_ui(priv, overrides, excluded);
     }
 
     if (g_key_file_has_group(state, STATE_GROUP_EXCLUDED))
     {
-        for (auto& a : priv->accounts)
+        gsize nkeys = 0;
+        gchar** keys = g_key_file_get_keys(state, STATE_GROUP_EXCLUDED, &nkeys, nullptr);
+        std::vector<std::string> excluded;
+        for (gsize i = 0; keys && i < nkeys; ++i)
         {
-            GError* err = nullptr;
-            gboolean ex = g_key_file_get_boolean(state, STATE_GROUP_EXCLUDED, a.full_name.c_str(), &err);
-            if (err)
-                g_error_free(err);
-            else if (ex)
-                a.included = false;
+            if (g_str_has_prefix(keys[i], "excl_"))
+            {
+                gchar* val = g_key_file_get_string(state, STATE_GROUP_EXCLUDED, keys[i], nullptr);
+                if (val)
+                {
+                    excluded.emplace_back(val);
+                    g_free(val);
+                }
+            }
+            else
+            {
+                GError* err = nullptr;
+                gboolean ex = g_key_file_get_boolean(state, STATE_GROUP_EXCLUDED, keys[i], &err);
+                if (err)
+                    g_error_free(err);
+                else if (ex)
+                    excluded.emplace_back(keys[i]);
+            }
         }
-        sync_acct_store_from_accounts(priv);
+        g_strfreev(keys);
+        if (!excluded.empty())
+        {
+            for (auto& a : priv->accounts)
+            {
+                for (const auto& ex : excluded)
+                {
+                    if (a.full_name == ex)
+                    {
+                        a.included = false;
+                        break;
+                    }
+                }
+            }
+            sync_acct_store_from_accounts(priv);
+        }
     }
 }
 
