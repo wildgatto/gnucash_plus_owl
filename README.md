@@ -30,19 +30,26 @@ Available under **Tools → Retirement Planner (Owl)...**, this standalone modul
 
 ### Account Mapping & Persistence
 - **Live GnuCash Account Mapping:** Imports Asset/Bank/Stock/Mutual balances and classifies them into `Taxable`, `Tax-Deferred` (401k/IRA), `Tax-Free` (Roth), `HSA`, and `Excluded` buckets.
-- **Preserved Manual Overrides:** Custom tax-bucket assignments in the **Account Mapping** tab are preserved when clicking **Refresh Accounts**.
-- **Per-Book Auto-Persistence:** Automatically saves and restores planner assumptions, display options (`Chart` mode, `Today's $`, `Planner Options` panel), and account bucket overrides in GnuCash's per-book state (`gnc_state_get_current()`).
-- **Plan Files & CSV Export:**
-  - **Plan ▾ → Save Plan As... / Load Plan...** (`*.owlplan`, `*.ini`)
+- **Include Checkboxes, Search & Bulk Selection:** Individual `Include` checkboxes, live search filter, **Select All / Deselect All**, and **Auto-Classify** controls.
+- **Preserved Manual Overrides & Persistent Selections:** Custom tax-bucket assignments and `Include` selections are persisted immediately per book (and preserved on **Refresh Accounts**).
+- **Plan Files, Auto-Reload & Exports:**
+  - **Plan ▾ → Save Plan As... / Load Plan...** (`*.owlplan`, `*.ini`) — automatically remembers and reloads your last `.owlplan` file on startup.
   - **Plan ▾ → Reset to Defaults**
   - **Export CSV...** for the full year-by-year projection schedule (in Today's `$` or Nominal `$`).
+  - **Report (HTML)...** for a self-contained, print-ready HTML/PDF retirement report with KPI summary, embedded SVG chart, and full schedule table.
 
 ### Tax, Healthcare & Optimization Engine
+- **Two-Person Household (Spouse / Partner):** Optional spouse age/horizon/contributions, independent Social Security & pension modeling, survivor benefits, and joint SS claiming optimization.
+- **Spending Phases & One-Time Cashflow Events:** Go-Go / Slow-Go / No-Go spending phase multipliers and custom lump-sum windfalls or expenses (e.g., home downsize, inheritance, college, mortgage payoff).
+- **Custom Cost Basis & Per-Bucket Returns:** Configurable initial taxable cost-basis percentage (`%`) for LTCG estimation and independent expected return rates per tax bucket (`Taxable`, `401k/IRA`, `Roth`, `HSA`).
 - **Federal Taxes & Medicare:** Ordinary income tax, LTCG, NIIT, IRMAA Medicare surcharges, and taxable Social Security calculation.
 - **50-State + DC Tax Modeling:** State income tax rules including state retirement-income and Social Security exemptions.
 - **Pre-Medicare ACA Modeling:** Pre-65 ACA Marketplace subsidies and optional 400% FPL cliff enforcement.
-- **RMD, Roth & Social Security Optimization:** SECURE 2.0 RMD projections, Roth conversion bracket-fill strategies (`12%`, `22%`, `24%`), and Social Security claiming age optimization (`62–70`).
-- **Comparison, Stress Testing & Charts:** **Baseline vs. Owl** comparison table, Monte Carlo stress testing (`success rate`, `P10 / P50 / P90`), and interactive Cairo charts (`Portfolio by Tax Bucket`, `Income & Withdrawals`, `Taxes, RMDs & Roth Conv`).
+- **RMD Re-investment, Income Floor & Roth/SS Optimization:** SECURE 2.0 RMD projections with optional after-tax RMD surplus re-investment into the taxable bucket, optional inflation-adjusted TIPS/annuity income floor tracking, Roth conversion bracket-fill strategies (`12%`, `22%`, `24%`), and Social Security claiming age optimization (`62–70`).
+- **Interactive Charts, Stress Testing & Break-Even Analysis:**
+  - **5 Chart Modes with Hover Tooltips:** `Portfolio by Tax Bucket`, `Income & Withdrawals`, `Taxes, RMDs & Roth Conv`, `Monte Carlo Fan (P10–P90)`, and `Tax & Healthcare Breakdown`.
+  - **Stress & Sensitivity Tab:** Sequence-of-returns stress scenarios (Early Crash, Lost Decade, Stagflation) and a 5×5 Return vs. Spending sensitivity matrix.
+  - **SS Break-Even Tab:** Cumulative Social Security benefits across claiming ages `62–70` with break-even ages vs. 62 and 67.
 
 ---
 

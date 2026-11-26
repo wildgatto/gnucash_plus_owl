@@ -176,6 +176,10 @@ struct PlanInput
 
     // One-time windfalls (+) or lump-sum expenses (-)
     std::vector<CashflowEvent> events;
+
+    // RMD & Income Floor enhancements
+    bool reinvest_rmd_surplus = true;  // Re-invest after-tax RMD/income surplus into taxable bucket
+    double tips_floor_annual = 0.0;    // Optional inflation-adjusted TIPS/annuity floor (today's $)
 };
 
 struct YearProjection
@@ -216,7 +220,10 @@ struct YearProjection
     // Net spending achieved (nominal & real)
     double net_spending_nominal = 0.0;
     double net_spending_real = 0.0;
-    double lump_sum_net = 0.0; // Net one-time event cashflow in year (nominal)
+    double lump_sum_net = 0.0;             // Net one-time event cashflow in year (nominal)
+    double rmd_reinvested = 0.0;           // After-tax RMD/income surplus reinvested in taxable (nominal)
+    double guaranteed_floor_nominal = 0.0; // SS + Pension + TIPS floor (nominal)
+    double floor_surplus_nominal = 0.0;    // guaranteed_floor - target_spending (nominal; <0 = gap)
     bool shortfall = false;
 };
 
@@ -257,6 +264,15 @@ struct SensitivityMatrix
     std::vector<double> return_rates;    // 5 rows (nominal return)
     std::vector<double> spending_levels; // 5 cols (annual spending in today's $)
     std::vector<std::vector<SensitivityCell>> cells; // [row][col]
+};
+
+struct SsBreakEvenRow
+{
+    int claim_age = 67;
+    double annual_benefit_real = 0.0;
+    int breakeven_vs_62 = 0;                // Age where cumulative >= claiming at 62 (0 if never)
+    int breakeven_vs_67 = 0;                // Age where cumulative >= claiming at 67 (0 if never)
+    std::vector<double> cumulative_at_ages; // Cumulative real $ at ages {65,70,75,80,85,90,95}
 };
 
 struct PlanResult
@@ -323,6 +339,9 @@ SensitivityMatrix run_sensitivity_matrix(
     double base_spending_real,
     int spouse_ss_claim_age = -1);
 
+/** Compute Social Security break-even analysis across claiming ages 62..70. */
+std::vector<SsBreakEvenRow> compute_ss_breakeven(const PlanInput& input);
+
 /** Human-readable name for a WithdrawalStrategy. */
 const char* strategy_label(WithdrawalStrategy s) noexcept;
 
@@ -356,6 +375,10 @@ bool deserialize_plan_ini(
 std::string export_schedule_csv(const PlanInput& input,
                                 const PlanResult& result,
                                 bool real_dollars = true);
+
+/** Export a self-contained, print-ready HTML retirement report (with embedded SVG chart). */
+std::string export_report_html(const PlanInput& input,
+                               const PlanResult& result);
 
 /** Compute state income tax for a single year. */
 double compute_state_tax(USState st,

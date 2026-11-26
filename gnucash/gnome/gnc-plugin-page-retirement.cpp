@@ -171,6 +171,8 @@ struct GncPluginPageRetirementPrivate
     GtkCheckButton* chk_enable_aca = nullptr;
     GtkSpinButton* spin_aca_bench = nullptr;
     GtkCheckButton* chk_aca_cliff = nullptr;
+    GtkCheckButton* chk_reinvest_rmd = nullptr;
+    GtkSpinButton* spin_tips_floor = nullptr;
     GtkSpinButton* spin_mc_trials = nullptr;
 
     // Spouse / Partner controls
@@ -219,6 +221,7 @@ struct GncPluginPageRetirementPrivate
     GtkLabel* lbl_acct_count = nullptr;
     GtkListStore* stress_store = nullptr;
     GtkListStore* sens_store = nullptr;
+    GtkListStore* ss_be_store = nullptr;
     GtkTreeViewColumn* sens_cols[6] = {};
 
     std::vector<MappedAccount> accounts;
@@ -544,6 +547,8 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.enable_aca = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_enable_aca));
     in.aca_benchmark_premium = gtk_spin_button_get_value(priv->spin_aca_bench);
     in.aca_enforce_400_cliff = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff));
+    in.reinvest_rmd_surplus = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd));
+    in.tips_floor_annual = gtk_spin_button_get_value(priv->spin_tips_floor);
     in.monte_carlo_trials = gtk_spin_button_get_value_as_int(priv->spin_mc_trials);
 
     in.has_spouse = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse));
@@ -643,6 +648,8 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_enable_aca), in.enable_aca);
     gtk_spin_button_set_value(priv->spin_aca_bench, in.aca_benchmark_premium);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff), in.aca_enforce_400_cliff);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd), in.reinvest_rmd_surplus);
+    gtk_spin_button_set_value(priv->spin_tips_floor, in.tips_floor_annual);
     gtk_spin_button_set_value(priv->spin_mc_trials, in.monte_carlo_trials);
 
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse), in.has_spouse);
@@ -762,6 +769,8 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "enable_aca", in.enable_aca);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "aca_benchmark_premium", in.aca_benchmark_premium);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "aca_enforce_400_cliff", in.aca_enforce_400_cliff);
+    g_key_file_set_boolean(state, STATE_GROUP_PLAN, "reinvest_rmd_surplus", in.reinvest_rmd_surplus);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "tips_floor_annual", in.tips_floor_annual);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "monte_carlo_trials", in.monte_carlo_trials);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "has_spouse", in.has_spouse);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_current_age", in.spouse_current_age);
@@ -903,6 +912,8 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.enable_aca = get_bool("enable_aca", in.enable_aca);
     in.aca_benchmark_premium = std::max(0.0, get_dbl("aca_benchmark_premium", in.aca_benchmark_premium));
     in.aca_enforce_400_cliff = get_bool("aca_enforce_400_cliff", in.aca_enforce_400_cliff);
+    in.reinvest_rmd_surplus = get_bool("reinvest_rmd_surplus", in.reinvest_rmd_surplus);
+    in.tips_floor_annual = std::max(0.0, get_dbl("tips_floor_annual", in.tips_floor_annual));
     in.monte_carlo_trials = std::clamp(get_int("monte_carlo_trials", in.monte_carlo_trials), 50, 1000);
     in.has_spouse = get_bool("has_spouse", in.has_spouse);
     in.spouse_current_age = std::clamp(get_int("spouse_current_age", in.spouse_current_age), 18, 95);
@@ -1176,6 +1187,34 @@ run_planner(GncPluginPageRetirementPrivate* priv)
                                1, txt[0].c_str(), 2, txt[1].c_str(), 3, txt[2].c_str(),
                                4, txt[3].c_str(), 5, txt[4].c_str(),
                                6, bg[0], 7, bg[1], 8, bg[2], 9, bg[3], 10, bg[4],
+                               -1);
+        }
+    }
+
+    if (priv->ss_be_store)
+    {
+        auto be_rows = compute_ss_breakeven(in);
+        gtk_list_store_clear(priv->ss_be_store);
+        for (const auto& r : be_rows)
+        {
+            char age_buf[16];
+            std::snprintf(age_buf, sizeof(age_buf), "%d%s",
+                          r.claim_age, (r.claim_age == res.chosen_ss_age) ? " ★" : "");
+            std::string be62 = r.breakeven_vs_62 > 0 ? ("Age " + std::to_string(r.breakeven_vs_62)) : "—";
+            std::string be67 = r.breakeven_vs_67 > 0 ? ("Age " + std::to_string(r.breakeven_vs_67)) : "—";
+            auto fmt_m = [&](size_t idx) -> std::string {
+                return (idx < r.cumulative_at_ages.size()) ? fmt_currency(r.cumulative_at_ages[idx]) : "—";
+            };
+            GtkTreeIter it;
+            gtk_list_store_append(priv->ss_be_store, &it);
+            gtk_list_store_set(priv->ss_be_store, &it,
+                               0, age_buf,
+                               1, fmt_currency(r.annual_benefit_real).c_str(),
+                               2, be62.c_str(),
+                               3, be67.c_str(),
+                               4, fmt_m(0).c_str(), 5, fmt_m(1).c_str(), 6, fmt_m(2).c_str(),
+                               7, fmt_m(3).c_str(), 8, fmt_m(4).c_str(), 9, fmt_m(5).c_str(),
+                               10, fmt_m(6).c_str(),
                                -1);
         }
     }
@@ -1724,6 +1763,39 @@ on_export_csv_clicked(GtkWidget*, gpointer user_data)
 }
 
 static void
+on_export_html_clicked(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    GtkWindow* parent = get_parent_window(priv);
+    GtkWidget* dlg = gtk_file_chooser_dialog_new(
+        _("Export Retirement Report (HTML / Print to PDF)"), parent,
+        GTK_FILE_CHOOSER_ACTION_SAVE,
+        _("_Cancel"), GTK_RESPONSE_CANCEL,
+        _("_Save"), GTK_RESPONSE_ACCEPT, nullptr);
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dlg), "retirement-report.html");
+
+    GtkFileFilter* filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, _("HTML files (*.html)"));
+    gtk_file_filter_add_pattern(filter, "*.html");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), filter);
+
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT)
+    {
+        gchar* filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        std::string html = export_report_html(priv->last_input, priv->last_result);
+        GError* err = nullptr;
+        if (!g_file_set_contents(filename, html.c_str(), static_cast<gssize>(html.size()), &err))
+        {
+            show_error_dialog(parent, err ? err->message : _("Failed to write HTML report."));
+            if (err) g_error_free(err);
+        }
+        g_free(filename);
+    }
+    gtk_widget_destroy(dlg);
+}
+
+static void
 on_save_plan_clicked(GtkWidget*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
@@ -2204,6 +2276,10 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     g_signal_connect(btn_export_csv, "clicked", G_CALLBACK(on_export_csv_clicked), priv);
     gtk_box_pack_end(GTK_BOX(top_bar), btn_export_csv, FALSE, FALSE, 0);
 
+    GtkWidget* btn_export_html = gtk_button_new_with_label(_("Report (HTML)..."));
+    g_signal_connect(btn_export_html, "clicked", G_CALLBACK(on_export_html_clicked), priv);
+    gtk_box_pack_end(GTK_BOX(top_bar), btn_export_html, FALSE, FALSE, 0);
+
     GtkWidget* plan_menu = gtk_menu_new();
     GtkWidget* mi_save = gtk_menu_item_new_with_label(_("Save Plan As..."));
     GtkWidget* mi_load = gtk_menu_item_new_with_label(_("Load Plan..."));
@@ -2283,6 +2359,7 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(g_inc, GTK_WIDGET(priv->chk_opt_ss), 0, r2++, 2, 1);
     priv->spin_pension = add_spin_row(g_inc, r2, _("Pension ($/yr)"), 0, 500000, 500, 0);
     priv->spin_pension_age = add_spin_row(g_inc, r2, _("Pension Age"), 50, 85, 1, 65);
+    priv->spin_tips_floor = add_spin_row(g_inc, r2, _("TIPS Floor ($/yr)"), 0, 500000, 1000, 0);
     priv->spin_contrib_tax = add_spin_row(g_inc, r2, _("Taxable Contrib/yr"), 0, 500000, 500, 10000);
     priv->spin_contrib_def = add_spin_row(g_inc, r2, _("401k/IRA Contrib/yr"), 0, 100000, 500, 23000);
     priv->spin_contrib_roth = add_spin_row(g_inc, r2, _("Roth Contrib/yr"), 0, 100000, 500, 7000);
@@ -2324,6 +2401,10 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     priv->chk_aca_cliff = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Enforce 400% FPL ACA Cliff")));
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff), TRUE);
     gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_aca_cliff), 0, r3++, 2, 1);
+
+    priv->chk_reinvest_rmd = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Re-invest RMD Surplus in Taxable")));
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd), TRUE);
+    gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_reinvest_rmd), 0, r3++, 2, 1);
 
     priv->spin_mc_trials = add_spin_row(g_mkt, r3, _("Monte Carlo Trials"), 50, 1000, 50, 300);
 
@@ -2663,6 +2744,32 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
 
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_stress, gtk_label_new(_("Stress & Sensitivity")));
 
+    // Tab 6: Social Security Break-Even Analysis
+    priv->ss_be_store = gtk_list_store_new(11,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkWidget* be_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->ss_be_store));
+    const char* be_titles[11] = {
+        "Claim Age", "Annual Benefit", "BE vs 62", "BE vs 67",
+        "Age 65", "Age 70", "Age 75", "Age 80", "Age 85", "Age 90", "Age 95"
+    };
+    for (int c = 0; c < 11; ++c)
+    {
+        GtkCellRenderer* rend = gtk_cell_renderer_text_new();
+        g_object_set(rend, "xalign", (c == 0) ? 0.5f : 1.0f, nullptr);
+        GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(
+            be_titles[c], rend, "text", c, nullptr);
+        gtk_tree_view_column_set_expand(col, TRUE);
+        gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(be_tv), col);
+    }
+    GtkWidget* be_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(be_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(be_scroll), be_tv);
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), be_scroll, gtk_label_new(_("SS Break-Even")));
+
     priv->root_widget = outer;
     gtk_widget_show_all(priv->root_widget);
 
@@ -2702,6 +2809,7 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         g_object_unref(priv->event_store);
         g_object_unref(priv->stress_store);
         g_object_unref(priv->sens_store);
+        g_object_unref(priv->ss_be_store);
         priv->sched_store = nullptr;
         priv->cmp_store = nullptr;
         priv->acct_filter = nullptr;
@@ -2709,6 +2817,7 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         priv->event_store = nullptr;
         priv->stress_store = nullptr;
         priv->sens_store = nullptr;
+        priv->ss_be_store = nullptr;
         priv->event_tv = nullptr;
         priv->entry_acct_filter = nullptr;
         priv->lbl_acct_count = nullptr;

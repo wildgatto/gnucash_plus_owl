@@ -498,17 +498,24 @@ PlanResult simulate_with_returns(const PlanInput& input,
         else if (age >= input.slow_go_age)
             spend_mult = std::clamp(input.slow_go_pct / 100.0, 0.1, 2.0);
 
+        const double tips = (retired && input.tips_floor_annual > 0.0)
+                            ? input.tips_floor_annual * inf : 0.0;
+        const double target_net_spend = retired ? (annual_spending_real * spend_mult * inf) : 0.0;
+        yp.guaranteed_floor_nominal = ss + pension + tips;
+        yp.floor_surplus_nominal = retired ? (yp.guaranteed_floor_nominal - target_net_spend) : 0.0;
+
         if (retired)
         {
-            const double target_net = annual_spending_real * spend_mult * inf;
+            const double target_net = target_net_spend;
 
             // Fixed-point / iterative gross-up (converges in 4-6 iterations)
             for (int iter = 0; iter < 6; ++iter)
             {
-                double ord_inc = pension + w_def + roth_conv;
+                double ord_inc = pension + tips + w_def + roth_conv;
                 double cg = w_tax * gain_ratio();
                 TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cg, ord_inc, true, tax_age, aca_adults, inf);
-                double current_net = ss + pension + w_tax + w_def + w_hsa + w_roth - tb.total();
+                double event_outflow = std::max(0.0, -yp.lump_sum_net);
+                double current_net = ss + pension + tips + w_tax + w_def + w_hsa + w_roth - event_outflow - tb.total();
                 double gap = target_net - current_net;
                 if (gap <= 1.0)
                     break;
@@ -587,11 +594,21 @@ PlanResult simulate_with_returns(const PlanInput& input,
 
         // Compute final taxes for the year
         double cap_gains = w_tax * gain_ratio();
-        double ord_inc = pension + w_def + roth_conv;
+        double ord_inc = pension + tips + w_def + roth_conv;
         TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cap_gains, ord_inc, retired, tax_age, aca_adults, inf);
 
-        double gross_inflow = ss + pension + w_tax + w_def + w_hsa + w_roth;
+        // Exclude one-time lump-sum expense outflows from regular spending / RMD surplus
+        double event_outflow = std::max(0.0, -yp.lump_sum_net);
+        double gross_inflow = ss + pension + tips + w_tax + w_def + w_hsa + w_roth - event_outflow;
         double net_spend = retired ? std::max(0.0, gross_inflow - tb.total()) : 0.0;
+        if (retired && input.reinvest_rmd_surplus && net_spend > target_net_spend)
+        {
+            double surplus = net_spend - target_net_spend;
+            bal_tax += surplus;
+            bal_basis += surplus;
+            yp.rmd_reinvested = surplus;
+            net_spend = target_net_spend;
+        }
         double net_spend_real = net_spend / inf;
 
         if (retired && net_spend_real + 1.0 < annual_spending_real * spend_mult)
@@ -1313,6 +1330,8 @@ std::string serialize_plan_ini(
     oss << "slow_go_pct=" << input.slow_go_pct << "\n";
     oss << "no_go_age=" << input.no_go_age << "\n";
     oss << "no_go_pct=" << input.no_go_pct << "\n";
+    oss << "reinvest_rmd_surplus=" << (input.reinvest_rmd_surplus ? "true" : "false") << "\n";
+    oss << "tips_floor_annual=" << input.tips_floor_annual << "\n";
 
     if (!input.events.empty())
     {
@@ -1476,6 +1495,8 @@ bool deserialize_plan_ini(
                 else if (lkey == "slow_go_pct") { in.slow_go_pct = std::clamp(std::stod(val), 10.0, 200.0); saw_plan_key = true; }
                 else if (lkey == "no_go_age") { in.no_go_age = std::clamp(std::stoi(val), 55, 110); saw_plan_key = true; }
                 else if (lkey == "no_go_pct") { in.no_go_pct = std::clamp(std::stod(val), 10.0, 200.0); saw_plan_key = true; }
+                else if (lkey == "reinvest_rmd_surplus") { in.reinvest_rmd_surplus = parse_bool(val, in.reinvest_rmd_surplus); saw_plan_key = true; }
+                else if (lkey == "tips_floor_annual") { in.tips_floor_annual = std::max(0.0, std::stod(val)); saw_plan_key = true; }
             }
             catch (...)
             {
@@ -1510,7 +1531,7 @@ std::string export_schedule_csv(const PlanInput& input,
            "Contributions,SSIncome,PensionIncome,RMD,RothConversion,"
            "WithdrawTaxable,WithdrawTaxDeferred,WithdrawRoth,WithdrawHSA,"
            "OrdinaryTax,LTCGTax,NIIT,StateTax,IRMAA,ACAPremium,TotalTax,"
-           "NetSpending,Shortfall,LumpSumNet\n";
+           "NetSpending,Shortfall,LumpSumNet,RMDReinvested,GuaranteedFloor,FloorSurplusDeficit\n";
 
     for (size_t i = 0; i < result.schedule.size(); ++i)
     {
@@ -1545,8 +1566,178 @@ std::string export_schedule_csv(const PlanInput& input,
             << (yp.total_tax / div) << ","
             << (yp.net_spending_nominal / div) << ","
             << (yp.shortfall ? 1 : 0) << ","
-            << (yp.lump_sum_net / div) << "\n";
+            << (yp.lump_sum_net / div) << ","
+            << (yp.rmd_reinvested / div) << ","
+            << (yp.guaranteed_floor_nominal / div) << ","
+            << (yp.floor_surplus_nominal / div) << "\n";
     }
+    return oss.str();
+}
+
+std::vector<SsBreakEvenRow> compute_ss_breakeven(const PlanInput& input)
+{
+    static constexpr int kMilestones[] = { 65, 70, 75, 80, 85, 90, 95 };
+    std::vector<SsBreakEvenRow> rows;
+    rows.reserve(9);
+
+    auto cum_at_age = [&](int claim_age, int end_age) -> double {
+        if (end_age < claim_age)
+            return 0.0;
+        double ann = adjusted_social_security(input.ss_fra_annual, claim_age);
+        return ann * static_cast<double>(end_age - claim_age + 1);
+    };
+
+    for (int ca = 62; ca <= 70; ++ca)
+    {
+        SsBreakEvenRow row;
+        row.claim_age = ca;
+        row.annual_benefit_real = adjusted_social_security(input.ss_fra_annual, ca);
+
+        for (int age = 62; age <= 100; ++age)
+        {
+            double c_ca = cum_at_age(ca, age);
+            if (ca > 62 && row.breakeven_vs_62 == 0 && c_ca >= cum_at_age(62, age) && c_ca > 0.0)
+                row.breakeven_vs_62 = age;
+            if (ca > 67 && row.breakeven_vs_67 == 0 && c_ca >= cum_at_age(67, age) && c_ca > 0.0)
+                row.breakeven_vs_67 = age;
+        }
+        for (int m : kMilestones)
+            row.cumulative_at_ages.push_back(cum_at_age(ca, m));
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+std::string export_report_html(const PlanInput& input,
+                               const PlanResult& result)
+{
+    std::ostringstream oss;
+    oss.imbue(std::locale::classic());
+    auto fmt_d = [](double v) -> std::string {
+        std::ostringstream s;
+        s.imbue(std::locale::classic());
+        long long iv = std::llround(v);
+        std::string raw = std::to_string(std::abs(iv));
+        std::string out;
+        int cnt = 0;
+        for (auto it = raw.rbegin(); it != raw.rend(); ++it)
+        {
+            if (cnt && cnt % 3 == 0) out.push_back(',');
+            out.push_back(*it);
+            ++cnt;
+        }
+        std::reverse(out.begin(), out.end());
+        return (iv < 0 ? "-$" : "$") + out;
+    };
+
+    oss << "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+           "<title>GnuCash + Owl Retirement Report</title>"
+           "<style>"
+           "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:24px;color:#1e293b;background:#f8fafc;}"
+           "h1{margin:0 0 4px;font-size:22px;color:#0f172a;} .sub{color:#64748b;font-size:13px;margin-bottom:18px;}"
+           ".kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}"
+           ".card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;}"
+           ".card .lbl{font-size:11px;text-transform:uppercase;color:#64748b;letter-spacing:.04em;}"
+           ".card .val{font-size:20px;font-weight:700;color:#0f172a;margin-top:4px;}"
+           ".box{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:18px;}"
+           "table{width:100%;border-collapse:collapse;font-size:12px;}"
+           "th,td{padding:5px 7px;border-bottom:1px solid #e2e8f0;text-align:right;}"
+           "th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:center;}"
+           "th{background:#f1f5f9;font-weight:600;color:#334155;}"
+           ".short{background:#fee2e2;color:#991b1b;}"
+           ".disc{font-size:11px;color:#64748b;margin-top:16px;}"
+           "@media print{body{background:#fff;margin:8mm;} @page{size:letter landscape;margin:10mm;}}"
+           "</style></head><body>";
+
+    oss << "<h1>Retirement Plan Report (GnuCash + Owl Experimental)</h1>"
+        << "<div class=\"sub\">Strategy: <b>" << strategy_label(result.chosen_strategy)
+        << "</b> &bull; SS Claim Age: <b>" << result.chosen_ss_age << "</b>"
+        << (input.has_spouse ? (" &bull; Spouse SS Age: <b>" + std::to_string(result.chosen_spouse_ss_age) + "</b>") : "")
+        << " &bull; State: <b>" << state_code(input.state) << "</b>"
+        << " &bull; All dollar figures in today's real dollars</div>";
+
+    oss << "<div class=\"kpis\">"
+        << "<div class=\"card\"><div class=\"lbl\">"
+        << (input.objective == PlanObjective::MaximizeSpending ? "Max Sustainable Spending / yr" : "Projected Final Bequest")
+        << "</div><div class=\"val\">"
+        << fmt_d(input.objective == PlanObjective::MaximizeSpending ? result.sustainable_spending_real : result.final_bequest_real)
+        << "</div></div>"
+        << "<div class=\"card\"><div class=\"lbl\">Advantage vs. Baseline</div><div class=\"val\">"
+        << fmt_d(result.advantage_real) << "</div></div>"
+        << "<div class=\"card\"><div class=\"lbl\">Lifetime Taxes &amp; Healthcare</div><div class=\"val\">"
+        << fmt_d(result.lifetime_taxes_real) << "</div></div>"
+        << "<div class=\"card\"><div class=\"lbl\">Monte Carlo Success (" << result.monte_carlo.trials << " trials)</div><div class=\"val\">"
+        << std::fixed << std::setprecision(1) << (result.monte_carlo.success_rate * 100.0) << "%</div></div>"
+        << "</div>";
+
+    // Embedded SVG Portfolio Chart
+    if (!result.schedule.empty())
+    {
+        const double W = 900.0, H = 260.0, PL = 68.0, PR = 20.0, PT = 18.0, PB = 30.0;
+        const double PW = W - PL - PR, PH = H - PT - PB;
+        double max_y = 1.0;
+        for (const auto& yp : result.schedule)
+            max_y = std::max(max_y, yp.end_total_real);
+        max_y *= 1.08;
+        const size_t n = result.schedule.size();
+        auto x_at = [&](size_t idx) { return PL + (n > 1 ? (PW * idx / (n - 1)) : 0.0); };
+        auto y_at = [&](double v) { return PT + PH - (PH * std::clamp(v / max_y, 0.0, 1.0)); };
+        auto poly = [&](auto getter, const char* stroke, double width) {
+            oss << "<polyline fill=\"none\" stroke=\"" << stroke << "\" stroke-width=\"" << width << "\" points=\"";
+            for (size_t i = 0; i < n; ++i)
+                oss << x_at(i) << "," << y_at(getter(result.schedule[i], i)) << " ";
+            oss << "\"/>";
+        };
+
+        oss << "<div class=\"box\"><b>Portfolio Trajectory (Today's Dollars)</b><br>"
+            << "<svg viewBox=\"0 0 " << W << " " << H << "\" style=\"width:100%;max-height:260px;\">"
+            << "<line x1=\"" << PL << "\" y1=\"" << PT << "\" x2=\"" << PL << "\" y2=\"" << (PT + PH) << "\" stroke=\"#cbd5e1\"/>"
+            << "<line x1=\"" << PL << "\" y1=\"" << (PT + PH) << "\" x2=\"" << (PL + PW) << "\" y2=\"" << (PT + PH) << "\" stroke=\"#cbd5e1\"/>"
+            << "<text x=\"4\" y=\"" << (PT + 10) << "\" font-size=\"10\" fill=\"#64748b\">" << fmt_d(max_y) << "</text>"
+            << "<text x=\"4\" y=\"" << (PT + PH) << "\" font-size=\"10\" fill=\"#64748b\">$0</text>"
+            << "<text x=\"" << PL << "\" y=\"" << (H - 6) << "\" font-size=\"10\" fill=\"#64748b\">Age " << result.schedule.front().age << "</text>"
+            << "<text x=\"" << (PL + PW - 45) << "\" y=\"" << (H - 6) << "\" font-size=\"10\" fill=\"#64748b\">Age " << result.schedule.back().age << "</text>";
+        poly([](const YearProjection& yp, size_t) { return yp.end_total_real; }, "#0f172a", 2.5);
+        poly([&](const YearProjection& yp, size_t i) { return yp.end_tax_deferred / std::pow(1.0 + input.inflation, static_cast<double>(i)); }, "#2563eb", 1.8);
+        poly([&](const YearProjection& yp, size_t i) { return yp.end_taxable / std::pow(1.0 + input.inflation, static_cast<double>(i)); }, "#16a34a", 1.8);
+        poly([&](const YearProjection& yp, size_t i) { return yp.end_tax_free / std::pow(1.0 + input.inflation, static_cast<double>(i)); }, "#9333ea", 1.8);
+        oss << "</svg>"
+            << "<div style=\"font-size:11px;color:#475569;margin-top:4px;\">"
+            << "<span style=\"color:#0f172a;\">&#9632; Total</span> &nbsp; "
+            << "<span style=\"color:#2563eb;\">&#9632; 401k/IRA</span> &nbsp; "
+            << "<span style=\"color:#16a34a;\">&#9632; Taxable</span> &nbsp; "
+            << "<span style=\"color:#9333ea;\">&#9632; Roth</span>"
+            << "</div></div>";
+    }
+
+    oss << "<div class=\"box\"><b>Year-by-Year Schedule (Today's Dollars)</b><table><thead><tr>"
+           "<th>Year</th><th>Age</th><th>End Total</th><th>Taxable</th><th>401k/IRA</th><th>Roth</th>"
+           "<th>SS + Pension</th><th>Floor Gap</th><th>RMD</th><th>Roth Conv</th><th>Total Tax</th><th>Net Spend</th>"
+           "</tr></thead><tbody>";
+
+    for (size_t i = 0; i < result.schedule.size(); ++i)
+    {
+        const auto& yp = result.schedule[i];
+        double inf = std::pow(1.0 + input.inflation, static_cast<double>(i));
+        oss << "<tr" << (yp.shortfall ? " class=\"short\"" : "") << ">"
+            << "<td>" << yp.year << "</td>"
+            << "<td>" << yp.age << "</td>"
+            << "<td>" << fmt_d(yp.end_total_real) << "</td>"
+            << "<td>" << fmt_d(yp.end_taxable / inf) << "</td>"
+            << "<td>" << fmt_d(yp.end_tax_deferred / inf) << "</td>"
+            << "<td>" << fmt_d(yp.end_tax_free / inf) << "</td>"
+            << "<td>" << fmt_d((yp.ss_income + yp.pension_income) / inf) << "</td>"
+            << "<td>" << fmt_d(yp.floor_surplus_nominal / inf) << "</td>"
+            << "<td>" << fmt_d(yp.rmd_amount / inf) << "</td>"
+            << "<td>" << fmt_d(yp.roth_conversion / inf) << "</td>"
+            << "<td>" << fmt_d(yp.total_tax / inf) << "</td>"
+            << "<td>" << fmt_d(yp.net_spending_real) << "</td>"
+            << "</tr>";
+    }
+    oss << "</tbody></table></div>"
+        << "<div class=\"disc\">Experimental feature only. Not affiliated with or endorsed by official GnuCash or Owl (mdlacasse/Owl). "
+           "Print this page (Ctrl+P / Save as PDF) to create a PDF copy.</div>"
+        << "</body></html>";
     return oss.str();
 }
 

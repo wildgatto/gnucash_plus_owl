@@ -495,3 +495,50 @@ TEST(RetirementEngine, AccountSelectionAndBucketOverridePersistence)
     ASSERT_EQ(rt_ex.size(), 1u);
     EXPECT_EQ(rt_ex[0], "Assets:Checking");
 }
+
+TEST(RetirementEngine, RmdReinvestmentIncomeFloorSsBreakEvenAndHtmlReport)
+{
+    PlanInput in;
+    in.current_age = 72;
+    in.retirement_age = 72;
+    in.horizon_age = 85;
+    in.initial_balances.tax_deferred = 2500000.0; // Large IRA -> RMD exceeds spending
+    in.contrib_taxable = 0.0;
+    in.contrib_tax_deferred = 0.0;
+    in.contrib_tax_free = 0.0;
+    in.contrib_hsa = 0.0;
+    in.ss_fra_annual = 36000.0;
+    in.optimize_ss_age = false;
+    in.strategy = WithdrawalStrategy::StandardTaxableFirst;
+    in.reinvest_rmd_surplus = true;
+    in.tips_floor_annual = 20000.0;
+    in.monte_carlo_trials = 10;
+
+    PlanResult r_reinv = simulate_plan(in, WithdrawalStrategy::StandardTaxableFirst, 67, 50000.0);
+    EXPECT_GT(r_reinv.schedule.front().rmd_reinvested, 0.0);
+    EXPECT_GT(r_reinv.schedule.back().end_taxable, 0.0);
+    EXPECT_GT(r_reinv.schedule.front().guaranteed_floor_nominal, 20000.0);
+
+    // SS Break-Even Analysis
+    auto be = compute_ss_breakeven(in);
+    ASSERT_EQ(be.size(), 9u); // ages 62..70
+    EXPECT_EQ(be[0].claim_age, 62);
+    EXPECT_EQ(be[8].claim_age, 70);
+    EXPECT_GT(be[8].annual_benefit_real, be[0].annual_benefit_real);
+    EXPECT_GE(be[8].breakeven_vs_62, 75);
+    EXPECT_LE(be[8].breakeven_vs_62, 85);
+
+    // HTML Report Export
+    std::string html = export_report_html(in, r_reinv);
+    EXPECT_NE(html.find("<!DOCTYPE html>"), std::string::npos);
+    EXPECT_NE(html.find("<svg"), std::string::npos);
+    EXPECT_NE(html.find("Year-by-Year Schedule"), std::string::npos);
+
+    // INI round-trip for new fields
+    std::string ini = serialize_plan_ini(in);
+    PlanInput rt;
+    std::vector<std::pair<std::string, TaxBucket>> ov;
+    ASSERT_TRUE(deserialize_plan_ini(ini, rt, ov));
+    EXPECT_TRUE(rt.reinvest_rmd_surplus);
+    EXPECT_DOUBLE_EQ(rt.tips_floor_annual, 20000.0);
+}
