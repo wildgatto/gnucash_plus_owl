@@ -75,6 +75,14 @@ enum class USState
     SC, SD, TN, TX, UT, VT, VA, WA, WV, WI, WY
 };
 
+struct CashflowEvent
+{
+    std::string name;
+    int age = 65;
+    double amount_real = 0.0; // + = windfall/inflow, - = lump-sum expense
+    TaxBucket bucket = TaxBucket::Taxable;
+};
+
 struct AccountBuckets
 {
     double taxable = 0.0;
@@ -150,6 +158,15 @@ struct PlanInput
     int spouse_rmd_start_age = 73;
     double spouse_contrib_tax_deferred = 0.0;
     double spouse_contrib_tax_free = 0.0;
+
+    // Spending Phases (Go-Go / Slow-Go / No-Go as % of base retirement spending)
+    int slow_go_age = 75;
+    double slow_go_pct = 100.0;
+    int no_go_age = 85;
+    double no_go_pct = 100.0;
+
+    // One-time windfalls (+) or lump-sum expenses (-)
+    std::vector<CashflowEvent> events;
 };
 
 struct YearProjection
@@ -190,6 +207,7 @@ struct YearProjection
     // Net spending achieved (nominal & real)
     double net_spending_nominal = 0.0;
     double net_spending_real = 0.0;
+    double lump_sum_net = 0.0; // Net one-time event cashflow in year (nominal)
     bool shortfall = false;
 };
 

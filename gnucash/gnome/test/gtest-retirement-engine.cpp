@@ -323,3 +323,58 @@ TEST(RetirementEngine, SpouseTwoPersonHouseholdAndSurvivorBenefit)
     EXPECT_DOUBLE_EQ(roundtrip.spouse_ss_fra_annual, 24000.0);
     EXPECT_DOUBLE_EQ(roundtrip.spouse_pension_annual, 10000.0);
 }
+
+TEST(RetirementEngine, SpendingPhasesAndLumpSumEvents)
+{
+    PlanInput base;
+    base.current_age = 62;
+    base.retirement_age = 65;
+    base.horizon_age = 90;
+    base.initial_balances.taxable = 400000.0;
+    base.initial_balances.tax_deferred = 600000.0;
+    base.ss_fra_annual = 30000.0;
+    base.optimize_ss_age = false;
+    base.strategy = WithdrawalStrategy::StandardTaxableFirst;
+    base.monte_carlo_trials = 20;
+
+    PlanResult r_flat = optimize_plan(base);
+
+    // Slow-Go (80% at 75) & No-Go (65% at 85) allow higher initial Go-Go spending
+    PlanInput phased = base;
+    phased.slow_go_age = 75;
+    phased.slow_go_pct = 80.0;
+    phased.no_go_age = 85;
+    phased.no_go_pct = 65.0;
+    PlanResult r_phased = optimize_plan(phased);
+    EXPECT_GT(r_phased.sustainable_spending_real, r_flat.sustainable_spending_real);
+
+    // Windfall at age 68 boosts sustainable spending; expense at age 66 reduces it
+    PlanInput windfall = base;
+    windfall.events.push_back({"Home Downsize", 68, 250000.0, TaxBucket::Taxable});
+    PlanResult r_windfall = optimize_plan(windfall);
+    EXPECT_GT(r_windfall.sustainable_spending_real, r_flat.sustainable_spending_real);
+
+    PlanInput expense = base;
+    expense.events.push_back({"Mortgage Payoff", 66, -150000.0, TaxBucket::Taxable});
+    PlanResult r_expense = optimize_plan(expense);
+    EXPECT_LT(r_expense.sustainable_spending_real, r_flat.sustainable_spending_real);
+
+    // INI round-trip for phases and events
+    phased.events = {
+        {"Home Downsize", 68, 250000.0, TaxBucket::Taxable},
+        {"Mortgage Payoff", 66, -150000.0, TaxBucket::TaxFree}
+    };
+    std::string ini = serialize_plan_ini(phased);
+    PlanInput out;
+    std::vector<std::pair<std::string, TaxBucket>> ov;
+    ASSERT_TRUE(deserialize_plan_ini(ini, out, ov));
+    EXPECT_EQ(out.slow_go_age, 75);
+    EXPECT_DOUBLE_EQ(out.slow_go_pct, 80.0);
+    EXPECT_EQ(out.no_go_age, 85);
+    EXPECT_DOUBLE_EQ(out.no_go_pct, 65.0);
+    ASSERT_EQ(out.events.size(), 2u);
+    EXPECT_EQ(out.events[0].name, "Home Downsize");
+    EXPECT_EQ(out.events[0].age, 68);
+    EXPECT_DOUBLE_EQ(out.events[0].amount_real, 250000.0);
+    EXPECT_EQ(out.events[1].bucket, TaxBucket::TaxFree);
+}

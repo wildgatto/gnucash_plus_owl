@@ -182,6 +182,14 @@ struct GncPluginPageRetirementPrivate
     GtkSpinButton* spin_sp_contrib_def = nullptr;
     GtkSpinButton* spin_sp_contrib_roth = nullptr;
 
+    // Spending Phases & One-Time Events
+    GtkSpinButton* spin_slow_go_age = nullptr;
+    GtkSpinButton* spin_slow_go_pct = nullptr;
+    GtkSpinButton* spin_no_go_age = nullptr;
+    GtkSpinButton* spin_no_go_pct = nullptr;
+    GtkListStore* event_store = nullptr;
+    GtkTreeView* event_tv = nullptr;
+
     // Bucket summary label
     GtkLabel* lbl_bucket_summary = nullptr;
 
@@ -203,6 +211,7 @@ struct GncPluginPageRetirementPrivate
     GtkLabel* lbl_acct_count = nullptr;
 
     std::vector<MappedAccount> accounts;
+    std::vector<CashflowEvent> events;
     PlanInput last_input;
     PlanResult last_result;
 };
@@ -247,6 +256,7 @@ gnc_plugin_page_retirement_init(GncPluginPageRetirement* page)
 {
     auto priv = GNC_PLUGIN_PAGE_RETIREMENT_GET_PRIVATE(page);
     new (&priv->accounts) std::vector<MappedAccount>();
+    new (&priv->events) std::vector<CashflowEvent>();
     new (&priv->last_input) PlanInput();
     new (&priv->last_result) PlanResult();
 
@@ -259,6 +269,7 @@ gnc_plugin_page_retirement_finalize(GObject* object)
     auto page = GNC_PLUGIN_PAGE_RETIREMENT(object);
     auto priv = GNC_PLUGIN_PAGE_RETIREMENT_GET_PRIVATE(page);
     priv->accounts.~vector();
+    priv->events.~vector();
     priv->last_input.~PlanInput();
     priv->last_result.~PlanResult();
     G_OBJECT_CLASS(gnc_plugin_page_retirement_parent_class)->finalize(object);
@@ -523,7 +534,33 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.spouse_rmd_start_age = gtk_spin_button_get_value_as_int(priv->spin_sp_rmd_age);
     in.spouse_contrib_tax_deferred = gtk_spin_button_get_value(priv->spin_sp_contrib_def);
     in.spouse_contrib_tax_free = gtk_spin_button_get_value(priv->spin_sp_contrib_roth);
+
+    in.slow_go_age = gtk_spin_button_get_value_as_int(priv->spin_slow_go_age);
+    in.slow_go_pct = gtk_spin_button_get_value(priv->spin_slow_go_pct);
+    in.no_go_age = std::max(in.slow_go_age, gtk_spin_button_get_value_as_int(priv->spin_no_go_age));
+    in.no_go_pct = gtk_spin_button_get_value(priv->spin_no_go_pct);
+    in.events = priv->events;
     return in;
+}
+
+static void
+sync_event_store(GncPluginPageRetirementPrivate* priv)
+{
+    if (!priv->event_store)
+        return;
+    gtk_list_store_clear(priv->event_store);
+    for (const auto& ev : priv->events)
+    {
+        GtkTreeIter it;
+        gtk_list_store_append(priv->event_store, &it);
+        std::string amt_str = (ev.amount_real >= 0 ? "+" : "-") + fmt_table_dollar(std::abs(ev.amount_real));
+        gtk_list_store_set(priv->event_store, &it,
+                           0, ev.age,
+                           1, ev.name.c_str(),
+                           2, amt_str.c_str(),
+                           3, bucket_label(ev.bucket),
+                           -1);
+    }
 }
 
 static void
@@ -592,6 +629,13 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_spin_button_set_value(priv->spin_sp_contrib_def, in.spouse_contrib_tax_deferred);
     gtk_spin_button_set_value(priv->spin_sp_contrib_roth, in.spouse_contrib_tax_free);
     update_spouse_sensitivity(priv);
+
+    gtk_spin_button_set_value(priv->spin_slow_go_age, in.slow_go_age);
+    gtk_spin_button_set_value(priv->spin_slow_go_pct, in.slow_go_pct);
+    gtk_spin_button_set_value(priv->spin_no_go_age, in.no_go_age);
+    gtk_spin_button_set_value(priv->spin_no_go_pct, in.no_go_pct);
+    priv->events = in.events;
+    sync_event_store(priv);
 }
 
 static std::vector<std::pair<std::string, TaxBucket>>
@@ -628,6 +672,7 @@ apply_account_overrides_to_ui(GncPluginPageRetirementPrivate* priv,
 static constexpr const char* STATE_GROUP_PLAN = "RetirementPlanner";
 static constexpr const char* STATE_GROUP_ACCTS = "RetirementPlannerAccounts";
 static constexpr const char* STATE_GROUP_EXCLUDED = "RetirementPlannerExcluded";
+static constexpr const char* STATE_GROUP_EVENTS = "RetirementPlannerEvents";
 
 static void
 save_state_to_book(GncPluginPageRetirementPrivate* priv)
@@ -677,6 +722,10 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv)
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_rmd_start_age", in.spouse_rmd_start_age);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_contrib_tax_deferred", in.spouse_contrib_tax_deferred);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_contrib_tax_free", in.spouse_contrib_tax_free);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "slow_go_age", in.slow_go_age);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "slow_go_pct", in.slow_go_pct);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "no_go_age", in.no_go_age);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "no_go_pct", in.no_go_pct);
 
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "chart_mode",
                            gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_chart_mode)));
@@ -687,11 +736,22 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv)
 
     g_key_file_remove_group(state, STATE_GROUP_ACCTS, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EXCLUDED, nullptr);
+    g_key_file_remove_group(state, STATE_GROUP_EVENTS, nullptr);
     for (const auto& a : priv->accounts)
     {
         g_key_file_set_string(state, STATE_GROUP_ACCTS, a.full_name.c_str(), bucket_label(a.bucket));
         if (!a.included)
             g_key_file_set_boolean(state, STATE_GROUP_EXCLUDED, a.full_name.c_str(), TRUE);
+    }
+    for (size_t i = 0; i < priv->events.size(); ++i)
+    {
+        const auto& ev = priv->events[i];
+        char key[32];
+        std::snprintf(key, sizeof(key), "event_%zu", i);
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), "%d|%.2f|%s|%s",
+                      ev.age, ev.amount_real, bucket_label(ev.bucket), ev.name.c_str());
+        g_key_file_set_string(state, STATE_GROUP_EVENTS, key, buf);
     }
 }
 
@@ -767,6 +827,42 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.spouse_rmd_start_age = std::clamp(get_int("spouse_rmd_start_age", in.spouse_rmd_start_age), 72, 75);
     in.spouse_contrib_tax_deferred = std::max(0.0, get_dbl("spouse_contrib_tax_deferred", in.spouse_contrib_tax_deferred));
     in.spouse_contrib_tax_free = std::max(0.0, get_dbl("spouse_contrib_tax_free", in.spouse_contrib_tax_free));
+    in.slow_go_age = std::clamp(get_int("slow_go_age", in.slow_go_age), 50, 110);
+    in.slow_go_pct = std::clamp(get_dbl("slow_go_pct", in.slow_go_pct), 10.0, 200.0);
+    in.no_go_age = std::clamp(get_int("no_go_age", in.no_go_age), 55, 110);
+    in.no_go_pct = std::clamp(get_dbl("no_go_pct", in.no_go_pct), 10.0, 200.0);
+
+    if (g_key_file_has_group(state, STATE_GROUP_EVENTS))
+    {
+        gsize nkeys = 0;
+        gchar** keys = g_key_file_get_keys(state, STATE_GROUP_EVENTS, &nkeys, nullptr);
+        for (gsize i = 0; keys && i < nkeys; ++i)
+        {
+            gchar* val = g_key_file_get_string(state, STATE_GROUP_EVENTS, keys[i], nullptr);
+            if (val)
+            {
+                std::string s(val);
+                size_t p1 = s.find('|');
+                size_t p2 = (p1 != std::string::npos) ? s.find('|', p1 + 1) : std::string::npos;
+                size_t p3 = (p2 != std::string::npos) ? s.find('|', p2 + 1) : std::string::npos;
+                if (p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos)
+                {
+                    try
+                    {
+                        CashflowEvent ev;
+                        ev.age = std::clamp(std::stoi(s.substr(0, p1)), 18, 110);
+                        ev.amount_real = std::stod(s.substr(p1 + 1, p2 - p1 - 1));
+                        ev.bucket = bucket_from_label(s.substr(p2 + 1, p3 - p2 - 1));
+                        ev.name = s.substr(p3 + 1);
+                        in.events.push_back(std::move(ev));
+                    }
+                    catch (...) {}
+                }
+                g_free(val);
+            }
+        }
+        g_strfreev(keys);
+    }
 
     apply_plan_input_to_ui(priv, in);
 
@@ -1317,6 +1413,86 @@ on_load_plan_clicked(GtkWidget*, gpointer user_data)
 }
 
 static void
+on_add_event_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    GtkWindow* parent = get_parent_window(priv);
+    GtkWidget* dlg = gtk_dialog_new_with_buttons(
+        _("Add One-Time Cashflow Event"), parent,
+        static_cast<GtkDialogFlags>(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+        _("_Cancel"), GTK_RESPONSE_CANCEL,
+        _("_Add"), GTK_RESPONSE_ACCEPT, nullptr);
+
+    GtkWidget* area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    GtkGrid* grid = GTK_GRID(gtk_grid_new());
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
+    gtk_grid_set_row_spacing(grid, 6);
+    gtk_grid_set_column_spacing(grid, 8);
+    gtk_box_pack_start(GTK_BOX(area), GTK_WIDGET(grid), TRUE, TRUE, 0);
+
+    GtkWidget* ent_name = gtk_entry_new();
+    gtk_entry_set_text(GTK_ENTRY(ent_name), _("Home Sale / Mortgage Payoff"));
+    gtk_grid_attach(grid, gtk_label_new(_("Event Name")), 0, 0, 1, 1);
+    gtk_grid_attach(grid, ent_name, 1, 0, 1, 1);
+
+    GtkWidget* sp_age = gtk_spin_button_new_with_range(18, 110, 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(sp_age), 65);
+    gtk_grid_attach(grid, gtk_label_new(_("At Primary Age")), 0, 1, 1, 1);
+    gtk_grid_attach(grid, sp_age, 1, 1, 1, 1);
+
+    GtkWidget* sp_amt = gtk_spin_button_new_with_range(-5000000, 5000000, 5000);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(sp_amt), 100000);
+    gtk_grid_attach(grid, gtk_label_new(_("Amount ($ today, +/-)")), 0, 2, 1, 1);
+    gtk_grid_attach(grid, sp_amt, 1, 2, 1, 1);
+
+    GtkWidget* cb_bkt = gtk_combo_box_text_new();
+    for (int b = 0; b <= static_cast<int>(TaxBucket::HSA); ++b)
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(cb_bkt), bucket_label(static_cast<TaxBucket>(b)));
+    gtk_combo_box_set_active(GTK_COMBO_BOX(cb_bkt), 0);
+    gtk_grid_attach(grid, gtk_label_new(_("Account Bucket")), 0, 3, 1, 1);
+    gtk_grid_attach(grid, cb_bkt, 1, 3, 1, 1);
+
+    gtk_widget_show_all(dlg);
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT)
+    {
+        CashflowEvent ev;
+        const gchar* txt = gtk_entry_get_text(GTK_ENTRY(ent_name));
+        ev.name = (txt && *txt) ? txt : _("Event");
+        ev.age = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(sp_age));
+        ev.amount_real = gtk_spin_button_get_value(GTK_SPIN_BUTTON(sp_amt));
+        ev.bucket = static_cast<TaxBucket>(std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(cb_bkt)), 0, 3));
+        priv->events.push_back(std::move(ev));
+        sync_event_store(priv);
+        run_planner(priv);
+    }
+    gtk_widget_destroy(dlg);
+}
+
+static void
+on_remove_event_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (!priv->event_tv)
+        return;
+    GtkTreeSelection* sel = gtk_tree_view_get_selection(priv->event_tv);
+    GtkTreeIter iter;
+    GtkTreeModel* model = nullptr;
+    if (gtk_tree_selection_get_selected(sel, &model, &iter))
+    {
+        GtkTreePath* path = gtk_tree_model_get_path(model, &iter);
+        int* indices = gtk_tree_path_get_indices(path);
+        int idx = indices ? indices[0] : -1;
+        gtk_tree_path_free(path);
+        if (idx >= 0 && idx < static_cast<int>(priv->events.size()))
+        {
+            priv->events.erase(priv->events.begin() + idx);
+            sync_event_store(priv);
+            run_planner(priv);
+        }
+    }
+}
+
+static void
 on_reset_defaults_clicked(GtkWidget*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
@@ -1762,6 +1938,59 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     priv->spin_sp_contrib_roth = add_spin_row(g_sp, r4, _("Spouse Roth Contrib"), 0, 100000, 500, 0);
     update_spouse_sensitivity(priv);
 
+    // Sub-tab 5: Spending Phases & One-Time Events
+    {
+        GtkWidget* ph_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+        gtk_container_set_border_width(GTK_CONTAINER(ph_box), 8);
+
+        GtkGrid* g_ph = GTK_GRID(gtk_grid_new());
+        gtk_grid_set_row_spacing(g_ph, 6);
+        gtk_grid_set_column_spacing(g_ph, 8);
+        int r5 = 0;
+        priv->spin_slow_go_age = add_spin_row(g_ph, r5, _("Slow-Go Age"), 50, 110, 1, 75);
+        priv->spin_slow_go_pct = add_spin_row(g_ph, r5, _("Slow-Go Spend (%)"), 20, 150, 5, 100);
+        priv->spin_no_go_age = add_spin_row(g_ph, r5, _("No-Go Age"), 55, 110, 1, 85);
+        priv->spin_no_go_pct = add_spin_row(g_ph, r5, _("No-Go Spend (%)"), 20, 150, 5, 100);
+        gtk_box_pack_start(GTK_BOX(ph_box), GTK_WIDGET(g_ph), FALSE, FALSE, 0);
+
+        GtkWidget* ev_hdr = gtk_label_new(_("One-Time Events (Windfalls / Expenses)"));
+        gtk_widget_set_halign(ev_hdr, GTK_ALIGN_START);
+        gtk_style_context_add_class(gtk_widget_get_style_context(ev_hdr), "gnc-class-strong");
+        gtk_box_pack_start(GTK_BOX(ph_box), ev_hdr, FALSE, FALSE, 4);
+
+        priv->event_store = gtk_list_store_new(4, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+        GtkWidget* ev_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->event_store));
+        priv->event_tv = GTK_TREE_VIEW(ev_tv);
+        const char* ev_titles[] = { "Age", "Name", "Amount", "Bucket" };
+        for (int c = 0; c < 4; ++c)
+        {
+            GtkCellRenderer* r = gtk_cell_renderer_text_new();
+            if (c == 1) g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, nullptr);
+            if (c == 2) g_object_set(r, "xalign", 1.0f, nullptr);
+            GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(ev_titles[c], r, "text", c, nullptr);
+            if (c == 1) gtk_tree_view_column_set_expand(col, TRUE);
+            gtk_tree_view_append_column(GTK_TREE_VIEW(ev_tv), col);
+        }
+
+        GtkWidget* ev_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ev_scroll),
+                                       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ev_scroll), 120);
+        gtk_container_add(GTK_CONTAINER(ev_scroll), ev_tv);
+        gtk_box_pack_start(GTK_BOX(ph_box), ev_scroll, TRUE, TRUE, 0);
+
+        GtkWidget* ev_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        GtkWidget* btn_add_ev = gtk_button_new_with_label(_("Add Event..."));
+        GtkWidget* btn_rem_ev = gtk_button_new_with_label(_("Remove"));
+        g_signal_connect(btn_add_ev, "clicked", G_CALLBACK(on_add_event_clicked), priv);
+        g_signal_connect(btn_rem_ev, "clicked", G_CALLBACK(on_remove_event_clicked), priv);
+        gtk_box_pack_start(GTK_BOX(ev_btns), btn_add_ev, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(ev_btns), btn_rem_ev, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(ph_box), ev_btns, FALSE, FALSE, 0);
+
+        gtk_notebook_append_page(GTK_NOTEBOOK(left_nb), ph_box, gtk_label_new(_("Phases/Events")));
+    }
+
     gtk_paned_pack1(GTK_PANED(paned), left_nb, FALSE, TRUE);
 
     // Right panel: Notebook with Overview/Chart, Schedule, Baseline vs Owl, Account Mapping
@@ -1955,10 +2184,13 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         g_object_unref(priv->cmp_store);
         g_object_unref(priv->acct_filter);
         g_object_unref(priv->acct_store);
+        g_object_unref(priv->event_store);
         priv->sched_store = nullptr;
         priv->cmp_store = nullptr;
         priv->acct_filter = nullptr;
         priv->acct_store = nullptr;
+        priv->event_store = nullptr;
+        priv->event_tv = nullptr;
         priv->entry_acct_filter = nullptr;
         priv->lbl_acct_count = nullptr;
         priv->chart_area = nullptr;

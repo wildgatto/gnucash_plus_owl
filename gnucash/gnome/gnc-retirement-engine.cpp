@@ -445,9 +445,48 @@ PlanResult simulate_with_returns(const PlanInput& input,
         // Apply RMD from tax-deferred first
         bal_def -= w_def;
 
+        // 3b. One-time lump-sum events at this age
+        for (const auto& ev : input.events)
+        {
+            if (ev.age != age || std::abs(ev.amount_real) < 1e-6)
+                continue;
+            double amt = ev.amount_real * inf;
+            yp.lump_sum_net += amt;
+            if (amt >= 0.0)
+            {
+                switch (ev.bucket)
+                {
+                    case TaxBucket::TaxFree:     bal_roth += amt; break;
+                    case TaxBucket::TaxDeferred: bal_def += amt; break;
+                    case TaxBucket::HSA:         bal_hsa += amt; break;
+                    default:                     bal_tax += amt; bal_basis += amt; break;
+                }
+            }
+            else
+            {
+                double need = -amt;
+                if (ev.bucket == TaxBucket::TaxFree)          need -= draw_roth(need);
+                else if (ev.bucket == TaxBucket::HSA)         need -= draw_hsa(need);
+                else if (ev.bucket == TaxBucket::TaxDeferred) { double td = std::min(bal_def, need); bal_def -= td; w_def += td; need -= td; }
+                else                                          need -= draw_taxable(need);
+
+                if (need > 1.0) need -= draw_taxable(need);
+                if (need > 1.0) { double td = std::min(bal_def, need); bal_def -= td; w_def += td; need -= td; }
+                if (need > 1.0) need -= draw_hsa(need);
+                if (need > 1.0) need -= draw_roth(need);
+                if (need > 1.0) { yp.shortfall = true; any_shortfall = true; }
+            }
+        }
+
+        double spend_mult = 1.0;
+        if (age >= input.no_go_age)
+            spend_mult = std::clamp(input.no_go_pct / 100.0, 0.1, 2.0);
+        else if (age >= input.slow_go_age)
+            spend_mult = std::clamp(input.slow_go_pct / 100.0, 0.1, 2.0);
+
         if (retired)
         {
-            const double target_net = annual_spending_real * inf;
+            const double target_net = annual_spending_real * spend_mult * inf;
 
             // Fixed-point / iterative gross-up (converges in 4-6 iterations)
             for (int iter = 0; iter < 6; ++iter)
@@ -541,13 +580,13 @@ PlanResult simulate_with_returns(const PlanInput& input,
         double net_spend = retired ? std::max(0.0, gross_inflow - tb.total()) : 0.0;
         double net_spend_real = net_spend / inf;
 
-        if (retired && net_spend_real + 1.0 < annual_spending_real)
+        if (retired && net_spend_real + 1.0 < annual_spending_real * spend_mult)
         {
             yp.shortfall = true;
             any_shortfall = true;
         }
-        if (retired)
-            min_spending_real = std::min(min_spending_real, net_spend_real);
+        if (retired && spend_mult > 0.0)
+            min_spending_real = std::min(min_spending_real, net_spend_real / spend_mult);
 
         // 5. Apply market return to remaining end-of-year balances
         bal_tax *= (1.0 + ret);
@@ -1159,6 +1198,21 @@ std::string serialize_plan_ini(
     oss << "spouse_rmd_start_age=" << input.spouse_rmd_start_age << "\n";
     oss << "spouse_contrib_tax_deferred=" << input.spouse_contrib_tax_deferred << "\n";
     oss << "spouse_contrib_tax_free=" << input.spouse_contrib_tax_free << "\n";
+    oss << "slow_go_age=" << input.slow_go_age << "\n";
+    oss << "slow_go_pct=" << input.slow_go_pct << "\n";
+    oss << "no_go_age=" << input.no_go_age << "\n";
+    oss << "no_go_pct=" << input.no_go_pct << "\n";
+
+    if (!input.events.empty())
+    {
+        oss << "\n[Events]\n";
+        for (size_t i = 0; i < input.events.size(); ++i)
+        {
+            const auto& ev = input.events[i];
+            oss << "event_" << i << "=" << ev.age << "|" << ev.amount_real
+                << "|" << bucket_label(ev.bucket) << "|" << ev.name << "\n";
+        }
+    }
 
     if (!account_overrides.empty())
     {
@@ -1204,6 +1258,28 @@ bool deserialize_plan_ini(
         {
             if (!key.empty())
                 overrides.emplace_back(key, bucket_from_label(val));
+            continue;
+        }
+
+        if (section == "events")
+        {
+            size_t p1 = val.find('|');
+            size_t p2 = (p1 != std::string::npos) ? val.find('|', p1 + 1) : std::string::npos;
+            size_t p3 = (p2 != std::string::npos) ? val.find('|', p2 + 1) : std::string::npos;
+            if (p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos)
+            {
+                try
+                {
+                    CashflowEvent ev;
+                    ev.age = std::clamp(std::stoi(val.substr(0, p1)), 18, 110);
+                    ev.amount_real = std::stod(val.substr(p1 + 1, p2 - p1 - 1));
+                    ev.bucket = bucket_from_label(val.substr(p2 + 1, p3 - p2 - 1));
+                    ev.name = trim_ws(val.substr(p3 + 1));
+                    in.events.push_back(std::move(ev));
+                    saw_plan_key = true;
+                }
+                catch (...) {}
+            }
             continue;
         }
 
@@ -1265,6 +1341,10 @@ bool deserialize_plan_ini(
                 else if (lkey == "spouse_rmd_start_age") { in.spouse_rmd_start_age = std::clamp(std::stoi(val), 72, 75); saw_plan_key = true; }
                 else if (lkey == "spouse_contrib_tax_deferred") { in.spouse_contrib_tax_deferred = std::max(0.0, std::stod(val)); saw_plan_key = true; }
                 else if (lkey == "spouse_contrib_tax_free") { in.spouse_contrib_tax_free = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "slow_go_age") { in.slow_go_age = std::clamp(std::stoi(val), 50, 110); saw_plan_key = true; }
+                else if (lkey == "slow_go_pct") { in.slow_go_pct = std::clamp(std::stod(val), 10.0, 200.0); saw_plan_key = true; }
+                else if (lkey == "no_go_age") { in.no_go_age = std::clamp(std::stoi(val), 55, 110); saw_plan_key = true; }
+                else if (lkey == "no_go_pct") { in.no_go_pct = std::clamp(std::stod(val), 10.0, 200.0); saw_plan_key = true; }
             }
             catch (...)
             {
@@ -1297,7 +1377,7 @@ std::string export_schedule_csv(const PlanInput& input,
            "Contributions,SSIncome,PensionIncome,RMD,RothConversion,"
            "WithdrawTaxable,WithdrawTaxDeferred,WithdrawRoth,WithdrawHSA,"
            "OrdinaryTax,LTCGTax,NIIT,StateTax,IRMAA,ACAPremium,TotalTax,"
-           "NetSpending,Shortfall\n";
+           "NetSpending,Shortfall,LumpSumNet\n";
 
     for (size_t i = 0; i < result.schedule.size(); ++i)
     {
@@ -1331,7 +1411,8 @@ std::string export_schedule_csv(const PlanInput& input,
             << (yp.aca_premium / div) << ","
             << (yp.total_tax / div) << ","
             << (yp.net_spending_nominal / div) << ","
-            << (yp.shortfall ? 1 : 0) << "\n";
+            << (yp.shortfall ? 1 : 0) << ","
+            << (yp.lump_sum_net / div) << "\n";
     }
     return oss.str();
 }
