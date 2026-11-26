@@ -203,6 +203,9 @@ struct GncPluginPageRetirementPrivate
 
     // Visualizations & tables
     GtkDrawingArea* chart_area = nullptr;
+    int chart_hover_idx = -1;
+    double chart_hover_x = 0.0;
+    double chart_hover_y = 0.0;
     GtkListStore* sched_store = nullptr;
     GtkListStore* cmp_store = nullptr;
     GtkListStore* acct_store = nullptr;
@@ -1307,6 +1310,173 @@ on_chart_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data)
         lx += 118.0;
     }
 
+    // Hover crosshair & tooltip overlay
+    if (priv->chart_hover_idx >= 0 && priv->chart_hover_idx < static_cast<int>(n))
+    {
+        const size_t hi = static_cast<size_t>(priv->chart_hover_idx);
+        const auto& yp = sched[hi];
+        const double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(hi)) : 1.0;
+        const double mult = use_real ? 1.0 : std::pow(1.0 + inf_rate, static_cast<double>(hi));
+
+        double hx = pad_l;
+        if (mode == ChartMode::MonteCarloFan)
+            hx = pad_l + (n > 1 ? (static_cast<double>(hi) / static_cast<double>(n - 1)) * plot_w : plot_w * 0.5);
+        else
+            hx = pad_l + (static_cast<double>(hi) + 0.5) * (plot_w / static_cast<double>(n));
+
+        cairo_set_source_rgba(cr, fg_color.red, fg_color.green, fg_color.blue, 0.38);
+        cairo_set_line_width(cr, 1.0);
+        cairo_move_to(cr, hx, pad_t);
+        cairo_line_to(cr, hx, pad_t + plot_h);
+        cairo_stroke(cr);
+
+        std::vector<std::string> lines;
+        char hdr[96];
+        if (priv->last_input.has_spouse)
+            std::snprintf(hdr, sizeof(hdr), "%d (Age %d / Sp %d)",
+                          yp.year, yp.age, priv->last_input.spouse_current_age + static_cast<int>(hi));
+        else
+            std::snprintf(hdr, sizeof(hdr), "%d (Age %d)", yp.year, yp.age);
+        lines.emplace_back(hdr);
+
+        auto add_line = [&](const char* k, double v) {
+            lines.push_back(std::string(k) + ": " + fmt_currency(v));
+        };
+
+        if (mode == ChartMode::PortfolioBuckets)
+        {
+            add_line("Total",      yp.end_total_nominal / div);
+            add_line("Taxable",    yp.end_taxable / div);
+            add_line("401k / IRA", yp.end_tax_deferred / div);
+            add_line("Roth",       yp.end_tax_free / div);
+            add_line("HSA",        yp.end_hsa / div);
+        }
+        else if (mode == ChartMode::IncomeAndWithdrawals)
+        {
+            add_line("SS + Pension", (yp.ss_income + yp.pension_income) / div);
+            add_line("Taxable Wd",   yp.withdraw_taxable / div);
+            add_line("401k/IRA Wd",  yp.withdraw_tax_deferred / div);
+            add_line("Roth/HSA Wd",  (yp.withdraw_tax_free + yp.withdraw_hsa) / div);
+            add_line("Net Spend",    yp.net_spending_nominal / div);
+        }
+        else if (mode == ChartMode::TaxesRmdAndRoth)
+        {
+            add_line("Fed Tax",   (yp.ordinary_tax + yp.ltcg_tax + yp.niit_tax) / div);
+            add_line("State Tax", yp.state_tax / div);
+            add_line("IRMAA/ACA", (yp.irmaa_surcharge + yp.aca_premium) / div);
+            add_line("RMD",       yp.rmd_amount / div);
+            add_line("Roth Conv", yp.roth_conversion / div);
+        }
+        else if (mode == ChartMode::MonteCarloFan)
+        {
+            if (hi < mc.p90_real.size())
+            {
+                add_line("P90",          mc.p90_real[hi] * mult);
+                add_line("P75",          mc.p75_real[hi] * mult);
+                add_line("Median (P50)", mc.p50_real[hi] * mult);
+                add_line("P25",          mc.p25_real[hi] * mult);
+                add_line("P10",          mc.p10_real[hi] * mult);
+            }
+            add_line("Deterministic", yp.end_total_nominal / div);
+        }
+        else
+        {
+            add_line("Fed Ord",   yp.ordinary_tax / div);
+            add_line("LTCG+NIIT", (yp.ltcg_tax + yp.niit_tax) / div);
+            add_line("State Tax", yp.state_tax / div);
+            add_line("IRMAA",     yp.irmaa_surcharge / div);
+            add_line("ACA (<65)", yp.aca_premium / div);
+            add_line("Total Tax", yp.total_tax / div);
+        }
+
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 11.5);
+        double max_tw = 0.0;
+        for (const auto& ln : lines)
+        {
+            cairo_text_extents_t ext;
+            cairo_text_extents(cr, ln.c_str(), &ext);
+            max_tw = std::max(max_tw, ext.width);
+        }
+
+        const double line_h = 16.0;
+        const double box_w = max_tw + 18.0;
+        const double box_h = static_cast<double>(lines.size()) * line_h + 12.0;
+        double bx = hx + 12.0;
+        if (bx + box_w > w - 8.0)
+            bx = hx - box_w - 12.0;
+        bx = std::max(8.0, bx);
+        double by = std::clamp(priv->chart_hover_y - box_h * 0.5, pad_t, pad_t + plot_h - box_h);
+
+        cairo_set_source_rgba(cr, 0.11, 0.13, 0.16, 0.92);
+        cairo_rectangle(cr, bx, by, box_w, box_h);
+        cairo_fill(cr);
+
+        cairo_set_source_rgba(cr, 0.55, 0.65, 0.78, 0.65);
+        cairo_set_line_width(cr, 1.0);
+        cairo_rectangle(cr, bx, by, box_w, box_h);
+        cairo_stroke(cr);
+
+        for (size_t li = 0; li < lines.size(); ++li)
+        {
+            cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                                   li == 0 ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+            cairo_set_source_rgba(cr, 0.96, 0.97, 0.99, 1.0);
+            cairo_move_to(cr, bx + 9.0, by + 18.0 + static_cast<double>(li) * line_h);
+            cairo_show_text(cr, lines[li].c_str());
+        }
+    }
+
+    return FALSE;
+}
+
+static gboolean
+on_chart_motion(GtkWidget* widget, GdkEventMotion* event, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    const auto& sched = priv->last_result.schedule;
+    if (sched.empty())
+        return FALSE;
+
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+    const double pad_l = 72.0, pad_r = 20.0;
+    const double plot_w = alloc.width - pad_l - pad_r;
+    if (plot_w <= 10.0)
+        return FALSE;
+
+    int new_idx = -1;
+    if (event->x >= pad_l && event->x <= alloc.width - pad_r)
+    {
+        const ChartMode mode = static_cast<ChartMode>(
+            std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_chart_mode)), 0, 4));
+        const size_t n = sched.size();
+        if (mode == ChartMode::MonteCarloFan && n > 1)
+            new_idx = static_cast<int>(std::lround(((event->x - pad_l) / plot_w) * static_cast<double>(n - 1)));
+        else
+            new_idx = static_cast<int>(std::floor(((event->x - pad_l) / plot_w) * static_cast<double>(n)));
+        new_idx = std::clamp(new_idx, 0, static_cast<int>(n) - 1);
+    }
+
+    if (new_idx != priv->chart_hover_idx || std::abs(event->y - priv->chart_hover_y) > 4.0)
+    {
+        priv->chart_hover_idx = new_idx;
+        priv->chart_hover_x = event->x;
+        priv->chart_hover_y = event->y;
+        gtk_widget_queue_draw(widget);
+    }
+    return FALSE;
+}
+
+static gboolean
+on_chart_leave(GtkWidget* widget, GdkEventCrossing*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (priv->chart_hover_idx != -1)
+    {
+        priv->chart_hover_idx = -1;
+        gtk_widget_queue_draw(widget);
+    }
     return FALSE;
 }
 
@@ -2094,7 +2264,11 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     priv->chart_area = GTK_DRAWING_AREA(gtk_drawing_area_new());
     gtk_widget_set_size_request(GTK_WIDGET(priv->chart_area), 300, 200);
     gtk_widget_set_vexpand(GTK_WIDGET(priv->chart_area), TRUE);
+    gtk_widget_add_events(GTK_WIDGET(priv->chart_area),
+                          GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK);
     g_signal_connect(priv->chart_area, "draw", G_CALLBACK(on_chart_draw), priv);
+    g_signal_connect(priv->chart_area, "motion-notify-event", G_CALLBACK(on_chart_motion), priv);
+    g_signal_connect(priv->chart_area, "leave-notify-event", G_CALLBACK(on_chart_leave), priv);
     gtk_box_pack_start(GTK_BOX(tab_overview), GTK_WIDGET(priv->chart_area), TRUE, TRUE, 0);
 
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_overview, gtk_label_new(_("Overview & Chart")));
