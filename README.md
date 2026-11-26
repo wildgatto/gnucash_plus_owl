@@ -28,15 +28,15 @@
 
 Available under **Tools → Retirement Planner (Owl)...**, this standalone module is inspired by the retirement planning concepts of [mdlacasse/Owl](https://github.com/mdlacasse/Owl).
 
-### Account Mapping & Persistence
-- **Live GnuCash Account Mapping:** Imports Asset/Bank/Stock/Mutual balances and classifies them into `Taxable`, `Tax-Deferred` (401k/IRA), `Tax-Free` (Roth), `HSA`, and `Excluded` buckets.
+### Account Mapping, Ledger Integration & Persistence
+- **Live GnuCash Account Mapping & Expense Estimator:** Imports Asset/Bank/Stock/Mutual balances into `Taxable`, `Tax-Deferred` (401k/IRA), `Tax-Free` (Roth), `HSA`, and `Excluded` buckets, and includes **Est. Spend from GnuCash Book** to estimate annual spending from trailing 12-month Expense transactions.
 - **Include Checkboxes, Search & Bulk Selection:** Individual `Include` checkboxes, live search filter, **Select All / Deselect All**, and **Auto-Classify** controls.
 - **Preserved Manual Overrides & Persistent Selections:** Custom tax-bucket assignments and `Include` selections are persisted immediately per book (and preserved on **Refresh Accounts**).
-- **Plan Files, Auto-Reload & Exports:**
+- **Plan Files, Snapshots, Exports & In-App Help:**
   - **Plan ▾ → Save Plan As... / Load Plan...** (`*.owlplan`, `*.ini`) — automatically remembers and reloads your last `.owlplan` file on startup.
-  - **Plan ▾ → Reset to Defaults**
-  - **Export CSV...** for the full year-by-year projection schedule (in Today's `$` or Nominal `$`).
-  - **Report (HTML)...** for a self-contained, print-ready HTML/PDF retirement report with KPI summary, embedded SVG chart, and full schedule table.
+  - **Plan ▾ → Pin Snapshot (Plan A) / Clear Snapshot** for side-by-side **Plan A vs. Plan B** comparison.
+  - **Plan ▾ → Export CSV... / Export HTML Report...** (print-ready HTML/PDF report with KPIs, SVG chart, Monte Carlo percentiles, Stress Tests, Historical Backtests, and Schedule).
+  - **Help (F1):** Built-in 4-tab Owl Retirement Planner manual accessible via `F1`, **Help → Contents**, or the toolbar button.
 
 ### Tax, Healthcare & Optimization Engine
 - **Two-Person Household (Spouse / Partner):** Optional spouse age/horizon/contributions, independent Social Security & pension modeling, survivor benefits, and joint SS claiming optimization.

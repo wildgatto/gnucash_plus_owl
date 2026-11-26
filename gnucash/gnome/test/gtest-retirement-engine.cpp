@@ -604,3 +604,48 @@ TEST(RetirementEngine, GuardrailsDebtLtcGlidePathBracketsAndHistoricalBacktests)
     EXPECT_EQ(rt.ltc_start_age, 82);
     EXPECT_EQ(rt.ltc_years, 3);
 }
+
+TEST(RetirementEngine, BridgeIncomeHeirTaxRateLookbackAndRichHtml)
+{
+    PlanInput base;
+    base.current_age = 60;
+    base.retirement_age = 60;
+    base.horizon_age = 85;
+    base.initial_balances.taxable = 200000.0;
+    base.initial_balances.tax_deferred = 800000.0;
+    base.ss_fra_annual = 30000.0;
+    base.optimize_ss_age = false;
+    base.strategy = WithdrawalStrategy::StandardTaxableFirst;
+    base.monte_carlo_trials = 15;
+
+    PlanResult r_no_bridge = simulate_plan(base, WithdrawalStrategy::StandardTaxableFirst, 67, 65000.0);
+
+    PlanInput with_bridge = base;
+    with_bridge.bridge_income_annual = 40000.0;
+    with_bridge.bridge_start_age = 60;
+    with_bridge.bridge_end_age = 65;
+    PlanResult r_bridge = simulate_plan(with_bridge, WithdrawalStrategy::StandardTaxableFirst, 67, 65000.0);
+    EXPECT_GT(r_bridge.final_bequest_real, r_no_bridge.final_bequest_real);
+
+    // Higher heir tax rate reduces after-tax final bequest
+    PlanInput high_heir = base;
+    high_heir.heir_tax_rate = 0.35;
+    PlanResult r_high_heir = simulate_plan(high_heir, WithdrawalStrategy::StandardTaxableFirst, 67, 65000.0);
+    EXPECT_LT(r_high_heir.final_bequest_real, r_no_bridge.final_bequest_real);
+
+    // Rich HTML report includes Monte Carlo & Historical Backtests
+    std::string html = export_report_html(base, r_no_bridge);
+    EXPECT_NE(html.find("Monte Carlo &amp; Stress Analysis"), std::string::npos);
+    EXPECT_NE(html.find("Historical Market Backtests"), std::string::npos);
+
+    // INI round-trip
+    with_bridge.heir_tax_rate = 0.28;
+    std::string ini = serialize_plan_ini(with_bridge);
+    PlanInput rt;
+    std::vector<std::pair<std::string, TaxBucket>> ov;
+    ASSERT_TRUE(deserialize_plan_ini(ini, rt, ov));
+    EXPECT_DOUBLE_EQ(rt.bridge_income_annual, 40000.0);
+    EXPECT_EQ(rt.bridge_start_age, 60);
+    EXPECT_EQ(rt.bridge_end_age, 65);
+    EXPECT_DOUBLE_EQ(rt.heir_tax_rate, 0.28);
+}

@@ -220,6 +220,8 @@ struct TaxBreakdown
     double aca = 0.0;
     int marginal_bracket_pct = 10;
     int irmaa_tier = 0;
+    bool cliff_warning = false;
+    double agi = 0.0;
     double total() const noexcept { return ordinary + ltcg + niit + state + irmaa + aca; }
 };
 
@@ -273,7 +275,8 @@ TaxBreakdown compute_year_taxes(const PlanInput& input,
                                 double ordinary_non_ss, double ss_benefit,
                                 double cap_gains, double retirement_dist,
                                 bool retired, int age, int aca_adults,
-                                double inf_factor)
+                                double inf_factor,
+                                double irmaa_magi_override = -1.0)
 {
     double ss_taxable = taxable_ss_portion(ss_benefit, ordinary_non_ss, cap_gains, year_status);
     double agi = ordinary_non_ss + ss_taxable + cap_gains;
@@ -282,21 +285,47 @@ TaxBreakdown compute_year_taxes(const PlanInput& input,
     double leftover_ded = std::max(0.0, ded - (ordinary_non_ss + ss_taxable));
     double taxable_cg = std::max(0.0, cap_gains - leftover_ded);
 
+    double irmaa_magi = (irmaa_magi_override >= 0.0) ? irmaa_magi_override : agi;
     TaxBreakdown tb;
+    tb.agi = agi;
     tb.ordinary = compute_ordinary_tax(taxable_ord, year_status, inf_factor);
     tb.ltcg = compute_ltcg_tax(taxable_ord, taxable_cg, year_status, inf_factor);
     tb.niit = compute_niit(agi, cap_gains, year_status, inf_factor);
     tb.state = compute_state_tax(input.state, ordinary_non_ss, ss_benefit, cap_gains,
                                  retirement_dist, year_status, age, inf_factor);
-    tb.irmaa = compute_irmaa(agi, year_status, age, inf_factor);
+    tb.irmaa = compute_irmaa(irmaa_magi, year_status, age, inf_factor);
     tb.marginal_bracket_pct = marginal_ordinary_pct(taxable_ord, year_status, inf_factor);
-    tb.irmaa_tier = irmaa_tier_from_magi(agi, year_status, age, inf_factor);
+    tb.irmaa_tier = irmaa_tier_from_magi(irmaa_magi, year_status, age, inf_factor);
+
+    // Check proximity (within $5,000 real) to IRMAA thresholds or 400% FPL ACA cliff
+    const double warn_buf = 5000.0 * inf_factor;
+    if (age >= 65)
+    {
+        bool mfj = (year_status == FilingStatus::MarriedFilingJointly);
+        const double tiers[4] = {
+            (mfj ? 212000.0 : 106000.0) * inf_factor,
+            (mfj ? 266000.0 : 133000.0) * inf_factor,
+            (mfj ? 334000.0 : 167000.0) * inf_factor,
+            (mfj ? 400000.0 : 200000.0) * inf_factor
+        };
+        for (double t : tiers)
+        {
+            if (irmaa_magi <= t && (t - irmaa_magi) <= warn_buf)
+                tb.cliff_warning = true;
+        }
+    }
     if (retired && input.enable_aca && aca_adults > 0)
     {
         FilingStatus aca_status = (aca_adults >= 2) ? FilingStatus::MarriedFilingJointly : FilingStatus::Single;
         tb.aca = compute_aca_premium(agi, aca_status, 60,
                                      input.aca_benchmark_premium,
                                      input.aca_enforce_400_cliff, inf_factor);
+        if (input.aca_enforce_400_cliff)
+        {
+            double fpl400 = 4.0 * (15650.0 + (aca_adults - 1) * 5500.0) * inf_factor;
+            if (agi <= fpl400 && (fpl400 - agi) <= warn_buf)
+                tb.cliff_warning = true;
+        }
     }
     return tb;
 }
@@ -359,6 +388,8 @@ PlanResult simulate_with_returns(const PlanInput& input,
     double min_spending_real = std::numeric_limits<double>::infinity();
     bool any_shortfall = false;
     double guardrail_mult = 1.0;
+    std::vector<double> agi_history;
+    agi_history.reserve(static_cast<size_t>(n_years));
 
     for (int i = 0; i < n_years; ++i)
     {
@@ -550,6 +581,10 @@ PlanResult simulate_with_returns(const PlanInput& input,
 
         const double tips = (retired && input.tips_floor_annual > 0.0)
                             ? input.tips_floor_annual * inf : 0.0;
+        const double bridge = (retired && p_alive && input.bridge_income_annual > 0.0
+                               && age >= input.bridge_start_age && age < input.bridge_end_age)
+                            ? (input.bridge_income_annual * inf) : 0.0;
+        const double irmaa_lookback = (i >= 2) ? agi_history[static_cast<size_t>(i - 2)] : -1.0;
         const double debt_nom = (retired && p_alive && input.debt_annual_payment > 0.0 && age < input.debt_payoff_age)
                             ? input.debt_annual_payment : 0.0;
         const double ltc_nom = (retired && p_alive && input.ltc_years > 0
@@ -581,11 +616,11 @@ PlanResult simulate_with_returns(const PlanInput& input,
             // Fixed-point / iterative gross-up (converges in 4-6 iterations)
             for (int iter = 0; iter < 6; ++iter)
             {
-                double ord_inc = pension + tips + w_def + roth_conv;
+                double ord_inc = pension + tips + bridge + w_def + roth_conv;
                 double cg = w_tax * gain_ratio();
-                TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cg, ord_inc, true, tax_age, aca_adults, inf);
+                TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cg, ord_inc, true, tax_age, aca_adults, inf, irmaa_lookback);
                 double event_outflow = std::max(0.0, -yp.lump_sum_net);
-                double current_net = ss + pension + tips + w_tax + w_def + w_hsa + w_roth - event_outflow - tb.total();
+                double current_net = ss + pension + tips + bridge + w_tax + w_def + w_hsa + w_roth - event_outflow - tb.total();
                 double gap = target_net - current_net;
                 if (gap <= 1.0)
                     break;
@@ -664,12 +699,13 @@ PlanResult simulate_with_returns(const PlanInput& input,
 
         // Compute final taxes for the year
         double cap_gains = w_tax * gain_ratio();
-        double ord_inc = pension + tips + w_def + roth_conv;
-        TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cap_gains, ord_inc, retired, tax_age, aca_adults, inf);
+        double ord_inc = pension + tips + bridge + w_def + roth_conv;
+        TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cap_gains, ord_inc, retired, tax_age, aca_adults, inf, irmaa_lookback);
+        agi_history.push_back(tb.agi);
 
         // Exclude one-time lump-sum expense outflows from regular spending / RMD surplus
         double event_outflow = std::max(0.0, -yp.lump_sum_net);
-        double gross_inflow = ss + pension + tips + w_tax + w_def + w_hsa + w_roth - event_outflow;
+        double gross_inflow = ss + pension + tips + bridge + w_tax + w_def + w_hsa + w_roth - event_outflow;
         double net_spend = retired ? std::max(0.0, gross_inflow - tb.total()) : 0.0;
         if (retired && input.reinvest_rmd_surplus && net_spend > target_net_spend)
         {
@@ -724,6 +760,7 @@ PlanResult simulate_with_returns(const PlanInput& input,
         yp.total_tax = tb.total();
         yp.marginal_bracket_pct = tb.marginal_bracket_pct;
         yp.irmaa_tier = tb.irmaa_tier;
+        yp.cliff_warning = tb.cliff_warning;
 
         yp.net_spending_nominal = net_spend;
         yp.net_spending_real = net_spend_real;
@@ -732,8 +769,9 @@ PlanResult simulate_with_returns(const PlanInput& input,
     }
 
     const double last_inf = std::pow(1.0 + input.inflation, std::max(0, n_years - 1));
-    // Approximate after-tax bequest (tax-deferred discounted by ~18% estate/heir tax)
-    double after_tax_bequest_nom = bal_tax + bal_roth + bal_hsa * 0.85 + bal_def * 0.82;
+    // After-tax bequest using configurable heir marginal tax rate on tax-deferred balances
+    const double heir_keep = 1.0 - std::clamp(input.heir_tax_rate, 0.0, 0.60);
+    double after_tax_bequest_nom = bal_tax + bal_roth + bal_hsa * 0.85 + bal_def * heir_keep;
     res.final_bequest_real = after_tax_bequest_nom / last_inf;
     res.lifetime_taxes_real = cum_taxes_real;
     res.sustainable_spending_real = std::isfinite(min_spending_real)
@@ -1532,6 +1570,10 @@ std::string serialize_plan_ini(
     oss << "bond_return=" << input.bond_return << "\n";
     oss << "equity_vol=" << input.equity_vol << "\n";
     oss << "bond_vol=" << input.bond_vol << "\n";
+    oss << "bridge_income_annual=" << input.bridge_income_annual << "\n";
+    oss << "bridge_start_age=" << input.bridge_start_age << "\n";
+    oss << "bridge_end_age=" << input.bridge_end_age << "\n";
+    oss << "heir_tax_rate=" << input.heir_tax_rate << "\n";
 
     if (!input.events.empty())
     {
@@ -1713,6 +1755,10 @@ bool deserialize_plan_ini(
                 else if (lkey == "bond_return") { in.bond_return = std::clamp(std::stod(val), 0.0, 0.20); saw_plan_key = true; }
                 else if (lkey == "equity_vol") { in.equity_vol = std::clamp(std::stod(val), 0.0, 0.50); saw_plan_key = true; }
                 else if (lkey == "bond_vol") { in.bond_vol = std::clamp(std::stod(val), 0.0, 0.30); saw_plan_key = true; }
+                else if (lkey == "bridge_income_annual") { in.bridge_income_annual = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "bridge_start_age") { in.bridge_start_age = std::clamp(std::stoi(val), 30, 95); saw_plan_key = true; }
+                else if (lkey == "bridge_end_age") { in.bridge_end_age = std::clamp(std::stoi(val), 30, 100); saw_plan_key = true; }
+                else if (lkey == "heir_tax_rate") { in.heir_tax_rate = std::clamp(std::stod(val), 0.0, 0.60); saw_plan_key = true; }
             }
             catch (...)
             {
@@ -1951,6 +1997,50 @@ std::string export_report_html(const PlanInput& input,
             << "<td>" << fmt_d(yp.total_tax / inf) << "</td>"
             << "<td>" << fmt_d(yp.net_spending_real) << "</td>"
             << "</tr>";
+    }
+    oss << "</tbody></table></div>";
+
+    // Monte Carlo Percentiles, Sequence Stress Tests, and Historical Backtests
+    oss << "<div class=\"box\"><b>Monte Carlo &amp; Stress Analysis</b><br>"
+        << "<div style=\"font-size:12px;color:#475569;margin:6px 0 10px;\">"
+        << "Monte Carlo Ending Real Wealth (" << result.monte_carlo.trials << " trials): "
+        << "<b>P10:</b> " << fmt_d(result.monte_carlo.p10_end_real)
+        << " &bull; <b>P50 (Median):</b> " << fmt_d(result.monte_carlo.p50_end_real)
+        << " &bull; <b>P90:</b> " << fmt_d(result.monte_carlo.p90_end_real)
+        << "</div>";
+
+    auto stress = run_sequence_stress_tests(
+        input, result.chosen_strategy, result.chosen_ss_age,
+        result.sustainable_spending_real, result.chosen_spouse_ss_age);
+    oss << "<table><thead><tr><th>Sequence Stress Scenario</th><th>Status</th><th>Min Spend/yr</th><th>Final Bequest</th><th>Shortfall Yrs</th></tr></thead><tbody>";
+    for (const auto& s : stress)
+    {
+        oss << "<tr" << (!s.feasible ? " class=\"short\"" : "") << ">"
+            << "<td style=\"text-align:left;\">" << s.name << "</td>"
+            << "<td>" << (s.feasible ? "Pass" : "Shortfall") << "</td>"
+            << "<td>" << fmt_d(s.min_spending_real) << "</td>"
+            << "<td>" << fmt_d(s.final_bequest_real) << "</td>"
+            << "<td>" << s.shortfall_years << "</td></tr>";
+    }
+    oss << "</tbody></table>";
+
+    auto hist = run_historical_backtests(
+        input, result.chosen_strategy, result.chosen_ss_age,
+        result.sustainable_spending_real, result.chosen_spouse_ss_age);
+    oss << "<div style=\"font-size:12px;color:#475569;margin:12px 0 6px;\">"
+        << "<b>Historical Market Backtests (1928–2024):</b> "
+        << std::fixed << std::setprecision(1) << (hist.rolling_success_rate * 100.0)
+        << "% success across " << hist.total_cycles << " rolling cycles</div>"
+        << "<table><thead><tr><th>Historical Cycle</th><th>Start</th><th>Status</th><th>Min Spend/yr</th><th>Final Bequest</th><th>Shortfall Yrs</th></tr></thead><tbody>";
+    for (const auto& h : hist.scenarios)
+    {
+        oss << "<tr" << (!h.feasible ? " class=\"short\"" : "") << ">"
+            << "<td style=\"text-align:left;\">" << h.name << "</td>"
+            << "<td>" << h.start_year << "</td>"
+            << "<td>" << (h.feasible ? "Pass" : "Shortfall") << "</td>"
+            << "<td>" << fmt_d(h.min_spending_real) << "</td>"
+            << "<td>" << fmt_d(h.final_bequest_real) << "</td>"
+            << "<td>" << h.shortfall_years << "</td></tr>";
     }
     oss << "</tbody></table></div>"
         << "<div class=\"disc\">Experimental feature only. Not affiliated with or endorsed by official GnuCash or Owl (mdlacasse/Owl). "

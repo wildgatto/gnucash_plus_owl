@@ -204,6 +204,12 @@ struct PlanInput
     double bond_return = 0.040;        // 4.0% nominal bond return
     double equity_vol = 0.16;          // 16% equity std dev
     double bond_vol = 0.05;            // 5% bond std dev
+
+    // Bridge / Part-Time Income & Estate Heir Tax Rate
+    double bridge_income_annual = 0.0; // Semi-retirement / consulting income (today's $)
+    int bridge_start_age = 60;
+    int bridge_end_age = 65;
+    double heir_tax_rate = 0.18;       // SECURE 10-yr heir marginal tax on remaining 401k/IRA
 };
 
 struct YearProjection
@@ -250,6 +256,7 @@ struct YearProjection
     double floor_surplus_nominal = 0.0;    // guaranteed_floor - target_spending (nominal; <0 = gap)
     int marginal_bracket_pct = 0;          // Federal ordinary marginal bracket (10..37%)
     int irmaa_tier = 0;                    // Medicare IRMAA tier (0 = none, 1..4)
+    bool cliff_warning = false;            // Near IRMAA tier or 400% FPL ACA cliff
     bool shortfall = false;
 };
 

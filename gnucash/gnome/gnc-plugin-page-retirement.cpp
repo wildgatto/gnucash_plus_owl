@@ -180,7 +180,18 @@ struct GncPluginPageRetirementPrivate
     GtkCheckButton* chk_enable_glide = nullptr;
     GtkSpinButton* spin_eq_pre = nullptr;
     GtkSpinButton* spin_eq_in = nullptr;
+    GtkSpinButton* spin_eq_ret = nullptr;
+    GtkSpinButton* spin_bd_ret = nullptr;
+    GtkSpinButton* spin_eq_vol = nullptr;
+    GtkSpinButton* spin_bd_vol = nullptr;
+    GtkSpinButton* spin_gr_upper = nullptr;
+    GtkSpinButton* spin_gr_lower = nullptr;
+    GtkSpinButton* spin_gr_adj = nullptr;
+    GtkSpinButton* spin_heir_tax = nullptr;
     GtkSpinButton* spin_tips_floor = nullptr;
+    GtkSpinButton* spin_bridge_inc = nullptr;
+    GtkSpinButton* spin_bridge_start = nullptr;
+    GtkSpinButton* spin_bridge_end = nullptr;
     GtkSpinButton* spin_mc_trials = nullptr;
 
     // Spouse / Partner controls
@@ -245,6 +256,9 @@ struct GncPluginPageRetirementPrivate
     std::string last_plan_path;
     PlanInput last_input;
     PlanResult last_result;
+    bool has_snapshot = false;
+    PlanInput snap_input;
+    PlanResult snap_result;
 };
 
 G_DEFINE_TYPE_WITH_PRIVATE(GncPluginPageRetirement, gnc_plugin_page_retirement, GNC_TYPE_PLUGIN_PAGE)
@@ -295,6 +309,8 @@ gnc_plugin_page_retirement_init(GncPluginPageRetirement* page)
     new (&priv->last_plan_path) std::string();
     new (&priv->last_input) PlanInput();
     new (&priv->last_result) PlanResult();
+    new (&priv->snap_input) PlanInput();
+    new (&priv->snap_result) PlanResult();
 
     gnc_plugin_page_add_book(GNC_PLUGIN_PAGE(page), gnc_get_current_book());
 }
@@ -309,6 +325,8 @@ gnc_plugin_page_retirement_finalize(GObject* object)
     priv->last_plan_path.~basic_string();
     priv->last_input.~PlanInput();
     priv->last_result.~PlanResult();
+    priv->snap_input.~PlanInput();
+    priv->snap_result.~PlanResult();
     G_OBJECT_CLASS(gnc_plugin_page_retirement_parent_class)->finalize(object);
 }
 
@@ -446,11 +464,13 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
         const auto& yp = res.schedule[i];
         const double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(i)) : 1.0;
 
-        char brk_buf[24];
+        char brk_buf[32];
         if (yp.irmaa_tier > 0)
-            std::snprintf(brk_buf, sizeof(brk_buf), "%d%% / T%d", yp.marginal_bracket_pct, yp.irmaa_tier);
+            std::snprintf(brk_buf, sizeof(brk_buf), "%d%% / T%d%s", yp.marginal_bracket_pct, yp.irmaa_tier,
+                          yp.cliff_warning ? " ⚠" : "");
         else
-            std::snprintf(brk_buf, sizeof(brk_buf), "%d%%", yp.marginal_bracket_pct);
+            std::snprintf(brk_buf, sizeof(brk_buf), "%d%%%s", yp.marginal_bracket_pct,
+                          yp.cliff_warning ? " ⚠" : "");
 
         GtkTreeIter iter;
         gtk_list_store_append(priv->sched_store, &iter);
@@ -522,6 +542,31 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
                 "—",
                 fmt_currency(res.monte_carlo.p50_end_real),
                 fmt_currency(res.monte_carlo.p10_end_real) + " .. " + fmt_currency(res.monte_carlo.p90_end_real));
+
+    if (priv->has_snapshot)
+    {
+        const PlanResult& pa = priv->snap_result;
+        double d_sp = res.sustainable_spending_real - pa.sustainable_spending_real;
+        double d_bq = res.final_bequest_real - pa.final_bequest_real;
+        double d_tx = res.lifetime_taxes_real - pa.lifetime_taxes_real;
+        add_cmp_row(_("--- Plan A (Snapshot) vs Plan B (Current) ---"), "Plan A", "Plan B", "Delta");
+        add_cmp_row(_("Snapshot Strategy"),
+                    strategy_label(pa.chosen_strategy),
+                    strategy_label(res.chosen_strategy),
+                    pa.chosen_strategy == res.chosen_strategy ? "Same" : "Changed");
+        add_cmp_row(_("Snapshot Spending / yr"),
+                    fmt_currency(pa.sustainable_spending_real),
+                    fmt_currency(res.sustainable_spending_real),
+                    (d_sp >= 0 ? "+" : "") + fmt_currency(d_sp));
+        add_cmp_row(_("Snapshot Final Bequest"),
+                    fmt_currency(pa.final_bequest_real),
+                    fmt_currency(res.final_bequest_real),
+                    (d_bq >= 0 ? "+" : "") + fmt_currency(d_bq));
+        add_cmp_row(_("Snapshot Lifetime Taxes"),
+                    fmt_currency(pa.lifetime_taxes_real),
+                    fmt_currency(res.lifetime_taxes_real),
+                    (d_tx >= 0 ? "+" : "") + fmt_currency(d_tx));
+    }
 }
 
 static PlanInput
@@ -575,10 +620,21 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.aca_enforce_400_cliff = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff));
     in.reinvest_rmd_surplus = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd));
     in.enable_guardrails = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_enable_guardrails));
+    in.guardrail_upper_wr = gtk_spin_button_get_value(priv->spin_gr_upper) / 100.0;
+    in.guardrail_lower_wr = gtk_spin_button_get_value(priv->spin_gr_lower) / 100.0;
+    in.guardrail_adj_pct = gtk_spin_button_get_value(priv->spin_gr_adj) / 100.0;
     in.enable_glide_path = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_enable_glide));
     in.equity_pct_pre_ret = gtk_spin_button_get_value(priv->spin_eq_pre);
     in.equity_pct_in_ret = gtk_spin_button_get_value(priv->spin_eq_in);
+    in.equity_return = gtk_spin_button_get_value(priv->spin_eq_ret) / 100.0;
+    in.bond_return = gtk_spin_button_get_value(priv->spin_bd_ret) / 100.0;
+    in.equity_vol = gtk_spin_button_get_value(priv->spin_eq_vol) / 100.0;
+    in.bond_vol = gtk_spin_button_get_value(priv->spin_bd_vol) / 100.0;
+    in.heir_tax_rate = gtk_spin_button_get_value(priv->spin_heir_tax) / 100.0;
     in.tips_floor_annual = gtk_spin_button_get_value(priv->spin_tips_floor);
+    in.bridge_income_annual = gtk_spin_button_get_value(priv->spin_bridge_inc);
+    in.bridge_start_age = gtk_spin_button_get_value_as_int(priv->spin_bridge_start);
+    in.bridge_end_age = gtk_spin_button_get_value_as_int(priv->spin_bridge_end);
     in.monte_carlo_trials = gtk_spin_button_get_value_as_int(priv->spin_mc_trials);
 
     in.has_spouse = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse));
@@ -688,10 +744,21 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff), in.aca_enforce_400_cliff);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd), in.reinvest_rmd_surplus);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_enable_guardrails), in.enable_guardrails);
+    gtk_spin_button_set_value(priv->spin_gr_upper, in.guardrail_upper_wr * 100.0);
+    gtk_spin_button_set_value(priv->spin_gr_lower, in.guardrail_lower_wr * 100.0);
+    gtk_spin_button_set_value(priv->spin_gr_adj, in.guardrail_adj_pct * 100.0);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_enable_glide), in.enable_glide_path);
     gtk_spin_button_set_value(priv->spin_eq_pre, in.equity_pct_pre_ret);
     gtk_spin_button_set_value(priv->spin_eq_in, in.equity_pct_in_ret);
+    gtk_spin_button_set_value(priv->spin_eq_ret, in.equity_return * 100.0);
+    gtk_spin_button_set_value(priv->spin_bd_ret, in.bond_return * 100.0);
+    gtk_spin_button_set_value(priv->spin_eq_vol, in.equity_vol * 100.0);
+    gtk_spin_button_set_value(priv->spin_bd_vol, in.bond_vol * 100.0);
+    gtk_spin_button_set_value(priv->spin_heir_tax, in.heir_tax_rate * 100.0);
     gtk_spin_button_set_value(priv->spin_tips_floor, in.tips_floor_annual);
+    gtk_spin_button_set_value(priv->spin_bridge_inc, in.bridge_income_annual);
+    gtk_spin_button_set_value(priv->spin_bridge_start, in.bridge_start_age);
+    gtk_spin_button_set_value(priv->spin_bridge_end, in.bridge_end_age);
     gtk_spin_button_set_value(priv->spin_mc_trials, in.monte_carlo_trials);
 
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse), in.has_spouse);
@@ -820,10 +887,21 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "aca_enforce_400_cliff", in.aca_enforce_400_cliff);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "reinvest_rmd_surplus", in.reinvest_rmd_surplus);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "enable_guardrails", in.enable_guardrails);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "guardrail_upper_wr", in.guardrail_upper_wr);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "guardrail_lower_wr", in.guardrail_lower_wr);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "guardrail_adj_pct", in.guardrail_adj_pct);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "enable_glide_path", in.enable_glide_path);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "equity_pct_pre_ret", in.equity_pct_pre_ret);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "equity_pct_in_ret", in.equity_pct_in_ret);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "equity_return", in.equity_return);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "bond_return", in.bond_return);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "equity_vol", in.equity_vol);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "bond_vol", in.bond_vol);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "heir_tax_rate", in.heir_tax_rate);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "tips_floor_annual", in.tips_floor_annual);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "bridge_income_annual", in.bridge_income_annual);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "bridge_start_age", in.bridge_start_age);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "bridge_end_age", in.bridge_end_age);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "debt_annual_payment", in.debt_annual_payment);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "debt_payoff_age", in.debt_payoff_age);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "ltc_start_age", in.ltc_start_age);
@@ -974,10 +1052,21 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.aca_enforce_400_cliff = get_bool("aca_enforce_400_cliff", in.aca_enforce_400_cliff);
     in.reinvest_rmd_surplus = get_bool("reinvest_rmd_surplus", in.reinvest_rmd_surplus);
     in.enable_guardrails = get_bool("enable_guardrails", in.enable_guardrails);
+    in.guardrail_upper_wr = std::clamp(get_dbl("guardrail_upper_wr", in.guardrail_upper_wr), 0.02, 0.20);
+    in.guardrail_lower_wr = std::clamp(get_dbl("guardrail_lower_wr", in.guardrail_lower_wr), 0.01, 0.15);
+    in.guardrail_adj_pct = std::clamp(get_dbl("guardrail_adj_pct", in.guardrail_adj_pct), 0.01, 0.50);
     in.enable_glide_path = get_bool("enable_glide_path", in.enable_glide_path);
     in.equity_pct_pre_ret = std::clamp(get_dbl("equity_pct_pre_ret", in.equity_pct_pre_ret), 0.0, 100.0);
     in.equity_pct_in_ret = std::clamp(get_dbl("equity_pct_in_ret", in.equity_pct_in_ret), 0.0, 100.0);
+    in.equity_return = std::clamp(get_dbl("equity_return", in.equity_return), 0.0, 0.25);
+    in.bond_return = std::clamp(get_dbl("bond_return", in.bond_return), 0.0, 0.20);
+    in.equity_vol = std::clamp(get_dbl("equity_vol", in.equity_vol), 0.0, 0.50);
+    in.bond_vol = std::clamp(get_dbl("bond_vol", in.bond_vol), 0.0, 0.30);
+    in.heir_tax_rate = std::clamp(get_dbl("heir_tax_rate", in.heir_tax_rate), 0.0, 0.60);
     in.tips_floor_annual = std::max(0.0, get_dbl("tips_floor_annual", in.tips_floor_annual));
+    in.bridge_income_annual = std::max(0.0, get_dbl("bridge_income_annual", in.bridge_income_annual));
+    in.bridge_start_age = std::clamp(get_int("bridge_start_age", in.bridge_start_age), 30, 95);
+    in.bridge_end_age = std::clamp(get_int("bridge_end_age", in.bridge_end_age), 30, 100);
     in.debt_annual_payment = std::max(0.0, get_dbl("debt_annual_payment", in.debt_annual_payment));
     in.debt_payoff_age = std::clamp(get_int("debt_payoff_age", in.debt_payoff_age), 30, 110);
     in.ltc_start_age = std::clamp(get_int("ltc_start_age", in.ltc_start_age), 50, 110);
@@ -1989,6 +2078,71 @@ on_page_f1_help(GncPluginPage* page)
     show_retirement_help_dialog(get_parent_window(priv));
 }
 
+struct ExpenseSumCtx
+{
+    time64 start_t = 0;
+    time64 end_t = 0;
+    double total = 0.0;
+};
+
+static void
+sum_expense_cb(Account* acct, gpointer data)
+{
+    auto* ctx = static_cast<ExpenseSumCtx*>(data);
+    if (!acct || xaccAccountGetType(acct) != ACCT_TYPE_EXPENSE)
+        return;
+    gnc_numeric chg = xaccAccountGetNoclosingBalanceChangeInCurrencyForPeriod(
+        acct, ctx->start_t, ctx->end_t, FALSE);
+    ctx->total += gnc_numeric_to_double(chg);
+}
+
+static void
+on_estimate_spending_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    QofBook* book = gnc_get_current_book();
+    if (!book)
+        return;
+    Account* root = gnc_book_get_root_account(book);
+    if (!root)
+        return;
+
+    ExpenseSumCtx ctx;
+    ctx.end_t = gnc_time(nullptr);
+    ctx.start_t = ctx.end_t - static_cast<time64>(365) * 86400;
+    gnc_account_foreach_descendant(root, sum_expense_cb, &ctx);
+
+    double annual = std::round(std::max(0.0, ctx.total) / 100.0) * 100.0;
+    if (annual > 0.0)
+    {
+        gtk_spin_button_set_value(priv->spin_target_spend, annual);
+        run_planner(priv);
+    }
+    else
+    {
+        show_error_dialog(get_parent_window(priv),
+                          _("No trailing 12-month Expense transactions found in this book."));
+    }
+}
+
+static void
+on_pin_snapshot_clicked(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    priv->snap_input = priv->last_input;
+    priv->snap_result = priv->last_result;
+    priv->has_snapshot = true;
+    populate_schedule_and_comparison(priv);
+}
+
+static void
+on_clear_snapshot_clicked(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    priv->has_snapshot = false;
+    populate_schedule_and_comparison(priv);
+}
+
 static void
 on_export_csv_clicked(GtkWidget*, gpointer user_data)
 {
@@ -2547,18 +2701,26 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     GtkWidget* mi_sep1 = gtk_separator_menu_item_new();
     GtkWidget* mi_exp_csv = gtk_menu_item_new_with_label(_("Export CSV..."));
     GtkWidget* mi_exp_html = gtk_menu_item_new_with_label(_("Export HTML Report..."));
+    GtkWidget* mi_sep2 = gtk_separator_menu_item_new();
+    GtkWidget* mi_pin_snap = gtk_menu_item_new_with_label(_("Pin Snapshot (Plan A)"));
+    GtkWidget* mi_clr_snap = gtk_menu_item_new_with_label(_("Clear Snapshot"));
     GtkWidget* mi_sep = gtk_separator_menu_item_new();
     GtkWidget* mi_reset = gtk_menu_item_new_with_label(_("Reset to Defaults"));
     g_signal_connect(mi_save, "activate", G_CALLBACK(on_save_plan_clicked), priv);
     g_signal_connect(mi_load, "activate", G_CALLBACK(on_load_plan_clicked), priv);
     g_signal_connect(mi_exp_csv, "activate", G_CALLBACK(on_export_csv_clicked), priv);
     g_signal_connect(mi_exp_html, "activate", G_CALLBACK(on_export_html_clicked), priv);
+    g_signal_connect(mi_pin_snap, "activate", G_CALLBACK(on_pin_snapshot_clicked), priv);
+    g_signal_connect(mi_clr_snap, "activate", G_CALLBACK(on_clear_snapshot_clicked), priv);
     g_signal_connect(mi_reset, "activate", G_CALLBACK(on_reset_defaults_clicked), priv);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_save);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_load);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_sep1);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_exp_csv);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_exp_html);
+    gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_sep2);
+    gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_pin_snap);
+    gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_clr_snap);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_sep);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_reset);
     gtk_widget_show_all(plan_menu);
@@ -2616,6 +2778,11 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
         strategy_label(WithdrawalStrategy::RothBracketFill24)
     }, 0);
     priv->spin_target_spend = add_spin_row(g_prof, r1, _("Target Spend ($/yr)"), 0, 1000000, 1000, 80000);
+    {
+        GtkWidget* btn_est = gtk_button_new_with_label(_("Est. Spend from GnuCash Book"));
+        g_signal_connect(btn_est, "clicked", G_CALLBACK(on_estimate_spending_clicked), priv);
+        gtk_grid_attach(g_prof, btn_est, 0, r1++, 2, 1);
+    }
     priv->spin_target_bequest = add_spin_row(g_prof, r1, _("Target Bequest ($)"), 0, 10000000, 5000, 100000);
 
     // Sub-tab 2: Income & Contributions
@@ -2633,6 +2800,9 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_pension_cola), TRUE);
     gtk_grid_attach(g_inc, GTK_WIDGET(priv->chk_pension_cola), 0, r2++, 2, 1);
     priv->spin_tips_floor = add_spin_row(g_inc, r2, _("TIPS Floor ($/yr)"), 0, 500000, 1000, 0);
+    priv->spin_bridge_inc = add_spin_row(g_inc, r2, _("Bridge Work ($/yr)"), 0, 500000, 1000, 0);
+    priv->spin_bridge_start = add_spin_row(g_inc, r2, _("Bridge Start Age"), 30, 95, 1, 60);
+    priv->spin_bridge_end = add_spin_row(g_inc, r2, _("Bridge End Age"), 30, 100, 1, 65);
     priv->spin_contrib_tax = add_spin_row(g_inc, r2, _("Taxable Contrib/yr"), 0, 500000, 500, 10000);
     priv->spin_contrib_def = add_spin_row(g_inc, r2, _("401k/IRA Contrib/yr"), 0, 100000, 500, 23000);
     priv->spin_contrib_roth = add_spin_row(g_inc, r2, _("Roth Contrib/yr"), 0, 100000, 500, 7000);
@@ -2681,11 +2851,19 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
 
     priv->chk_enable_guardrails = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Guyton-Klinger Guardrails (+/-10%)")));
     gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_enable_guardrails), 0, r3++, 2, 1);
+    priv->spin_gr_upper = add_spin_row(g_mkt, r3, _("Guardrail Upper WR (%)"), 2.0, 20.0, 0.25, 6.0, 2);
+    priv->spin_gr_lower = add_spin_row(g_mkt, r3, _("Guardrail Lower WR (%)"), 1.0, 15.0, 0.25, 4.0, 2);
+    priv->spin_gr_adj = add_spin_row(g_mkt, r3, _("Guardrail Adj (%)"), 1.0, 50.0, 1.0, 10.0, 1);
 
     priv->chk_enable_glide = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Use Equity/Bond Glide Path")));
     gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_enable_glide), 0, r3++, 2, 1);
     priv->spin_eq_pre = add_spin_row(g_mkt, r3, _("Pre-Retire Equity (%)"), 0, 100, 5, 80);
     priv->spin_eq_in = add_spin_row(g_mkt, r3, _("In-Retire Equity (%)"), 0, 100, 5, 55);
+    priv->spin_eq_ret = add_spin_row(g_mkt, r3, _("Equity Return (%)"), 0.0, 20.0, 0.25, 8.5, 2);
+    priv->spin_bd_ret = add_spin_row(g_mkt, r3, _("Bond Return (%)"), 0.0, 15.0, 0.25, 4.0, 2);
+    priv->spin_eq_vol = add_spin_row(g_mkt, r3, _("Equity Volatility (%)"), 0.0, 40.0, 0.5, 16.0, 1);
+    priv->spin_bd_vol = add_spin_row(g_mkt, r3, _("Bond Volatility (%)"), 0.0, 25.0, 0.5, 5.0, 1);
+    priv->spin_heir_tax = add_spin_row(g_mkt, r3, _("Heir Tax Rate (%)"), 0.0, 60.0, 1.0, 18.0, 1);
 
     priv->spin_mc_trials = add_spin_row(g_mkt, r3, _("Monte Carlo Trials"), 50, 1000, 50, 300);
 
