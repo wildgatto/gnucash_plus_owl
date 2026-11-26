@@ -2509,7 +2509,8 @@ on_ai_stream_read(GObject* source, GAsyncResult* res, gpointer user_data)
         }
     }
 
-    g_input_stream_read_bytes_async(ctx->stream, 4096, G_PRIORITY_DEFAULT,
+    GInputStream* stream = ctx->stream;
+    g_input_stream_read_bytes_async(stream, 4096, G_PRIORITY_DEFAULT,
                                     priv->ai_cancel, on_ai_stream_read, ctx.release());
 }
 
@@ -2537,7 +2538,7 @@ on_ai_send_opened(GObject* source, GAsyncResult* res, gpointer user_data)
     }
 
     ctx->stream = in_stream;
-    g_input_stream_read_bytes_async(ctx->stream, 4096, G_PRIORITY_DEFAULT,
+    g_input_stream_read_bytes_async(in_stream, 4096, G_PRIORITY_DEFAULT,
                                     priv->ai_cancel, on_ai_stream_read, ctx.release());
 }
 
