@@ -236,6 +236,7 @@ static void gnc_plugin_page_retirement_finalize(GObject* object);
 static GtkWidget* gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page);
 static void gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page);
 static void gnc_plugin_page_retirement_save_page(GncPluginPage* plugin_page, GKeyFile* key_file, const gchar* group_name);
+static GncPluginPage* gnc_plugin_page_retirement_recreate_page(GtkWidget* window, GKeyFile* key_file, const gchar* group_name);
 
 static void refresh_accounts_from_book(GncPluginPageRetirementPrivate* priv);
 static void populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv);
@@ -262,6 +263,7 @@ gnc_plugin_page_retirement_class_init(GncPluginPageRetirementClass* klass)
     gnc_plugin_class->create_widget = gnc_plugin_page_retirement_create_widget;
     gnc_plugin_class->destroy_widget = gnc_plugin_page_retirement_destroy_widget;
     gnc_plugin_class->save_page = gnc_plugin_page_retirement_save_page;
+    gnc_plugin_class->recreate_page = gnc_plugin_page_retirement_recreate_page;
 }
 
 static void
@@ -718,7 +720,7 @@ static constexpr const char* STATE_GROUP_EXCLUDED = "RetirementPlannerExcluded";
 static constexpr const char* STATE_GROUP_EVENTS = "RetirementPlannerEvents";
 
 static void
-save_state_to_book(GncPluginPageRetirementPrivate* priv)
+save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = true)
 {
     if (!priv || !priv->root_widget)
         return;
@@ -800,6 +802,12 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv)
         std::snprintf(buf, sizeof(buf), "%d|%.2f|%s|%s",
                       ev.age, ev.amount_real, bucket_label(ev.bucket), ev.name.c_str());
         g_key_file_set_string(state, STATE_GROUP_EVENTS, key, buf);
+    }
+
+    if (flush_to_disk && gnc_current_session_exist())
+    {
+        if (QofSession* sess = gnc_get_current_session())
+            gnc_state_save(sess);
     }
 }
 
@@ -2559,7 +2567,13 @@ gnc_plugin_page_retirement_save_page(GncPluginPage* plugin_page, GKeyFile*, cons
 {
     auto page = GNC_PLUGIN_PAGE_RETIREMENT(plugin_page);
     auto priv = GNC_PLUGIN_PAGE_RETIREMENT_GET_PRIVATE(page);
-    save_state_to_book(priv);
+    save_state_to_book(priv, false);
+}
+
+static GncPluginPage*
+gnc_plugin_page_retirement_recreate_page(GtkWidget*, GKeyFile*, const gchar*)
+{
+    return gnc_plugin_page_retirement_new();
 }
 
 static void
