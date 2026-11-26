@@ -223,6 +223,7 @@ struct GncPluginPageRetirementPrivate
 
     std::vector<MappedAccount> accounts;
     std::vector<CashflowEvent> events;
+    std::string last_plan_path;
     PlanInput last_input;
     PlanResult last_result;
 };
@@ -272,6 +273,7 @@ gnc_plugin_page_retirement_init(GncPluginPageRetirement* page)
     auto priv = GNC_PLUGIN_PAGE_RETIREMENT_GET_PRIVATE(page);
     new (&priv->accounts) std::vector<MappedAccount>();
     new (&priv->events) std::vector<CashflowEvent>();
+    new (&priv->last_plan_path) std::string();
     new (&priv->last_input) PlanInput();
     new (&priv->last_result) PlanResult();
 
@@ -285,6 +287,7 @@ gnc_plugin_page_retirement_finalize(GObject* object)
     auto priv = GNC_PLUGIN_PAGE_RETIREMENT_GET_PRIVATE(page);
     priv->accounts.~vector();
     priv->events.~vector();
+    priv->last_plan_path.~basic_string();
     priv->last_input.~PlanInput();
     priv->last_result.~PlanResult();
     G_OBJECT_CLASS(gnc_plugin_page_retirement_parent_class)->finalize(object);
@@ -783,6 +786,10 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
                            gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_real_dollars)));
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "show_params",
                            gtk_toggle_button_get_active(priv->btn_toggle_params));
+    if (!priv->last_plan_path.empty())
+        g_key_file_set_string(state, STATE_GROUP_PLAN, "last_owlplan_path", priv->last_plan_path.c_str());
+    else
+        g_key_file_remove_key(state, STATE_GROUP_PLAN, "last_owlplan_path", nullptr);
 
     g_key_file_remove_group(state, STATE_GROUP_ACCTS, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EXCLUDED, nullptr);
@@ -947,6 +954,30 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     }
 
     apply_plan_input_to_ui(priv, in);
+
+    // Automatically load the last saved/opened .owlplan file if it still exists
+    if (gchar* last_path = g_key_file_get_string(state, STATE_GROUP_PLAN, "last_owlplan_path", nullptr))
+    {
+        if (last_path[0] != '\0' && g_file_test(last_path, G_FILE_TEST_IS_REGULAR))
+        {
+            gchar* contents = nullptr;
+            gsize length = 0;
+            if (g_file_get_contents(last_path, &contents, &length, nullptr))
+            {
+                PlanInput file_in = in;
+                std::vector<std::pair<std::string, TaxBucket>> file_ov;
+                std::vector<std::string> file_ex;
+                if (deserialize_plan_ini(std::string(contents, length), file_in, file_ov, &file_ex))
+                {
+                    priv->last_plan_path = last_path;
+                    apply_plan_input_to_ui(priv, file_in);
+                    apply_account_overrides_to_ui(priv, file_ov, file_ex);
+                }
+                g_free(contents);
+            }
+        }
+        g_free(last_path);
+    }
 
     int chart_mode = std::clamp(get_int("chart_mode", 0), 0, 4);
     gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_chart_mode), chart_mode);
@@ -1703,7 +1734,10 @@ on_save_plan_clicked(GtkWidget*, gpointer user_data)
         _("_Cancel"), GTK_RESPONSE_CANCEL,
         _("_Save"), GTK_RESPONSE_ACCEPT, nullptr);
     gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
-    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dlg), "retirement-plan.owlplan");
+    if (!priv->last_plan_path.empty())
+        gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(dlg), priv->last_plan_path.c_str());
+    else
+        gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dlg), "retirement-plan.owlplan");
 
     GtkFileFilter* filter = gtk_file_filter_new();
     gtk_file_filter_set_name(filter, _("Owl Plan files (*.owlplan, *.ini)"));
@@ -1722,6 +1756,11 @@ on_save_plan_clicked(GtkWidget*, gpointer user_data)
         {
             show_error_dialog(parent, err ? err->message : _("Failed to save plan file."));
             if (err) g_error_free(err);
+        }
+        else
+        {
+            priv->last_plan_path = filename;
+            save_state_to_book(priv);
         }
         g_free(filename);
     }
@@ -1758,6 +1797,7 @@ on_load_plan_clicked(GtkWidget*, gpointer user_data)
             std::vector<std::string> excluded;
             if (deserialize_plan_ini(std::string(contents, length), loaded, overrides, &excluded))
             {
+                priv->last_plan_path = filename;
                 apply_plan_input_to_ui(priv, loaded);
                 apply_account_overrides_to_ui(priv, overrides, excluded);
                 save_state_to_book(priv);
