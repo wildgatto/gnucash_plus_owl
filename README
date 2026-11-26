@@ -1,75 +1,70 @@
-############################################################
-          gnucash_plus_owl README file (EXPERIMENTAL)
+========================================================================
+  gnucash_plus_owl  (EXPERIMENTAL)
+========================================================================
 
-DISCLAIMER: This repository (`gnucash_plus_owl`) is an
-EXPERIMENTAL, UNOFFICIAL fork for personal exploration only.
-It is NOT affiliated with, endorsed by, or related to the
-official GnuCash project (https://www.gnucash.org/) or the
-official Owl project (https://github.com/mdlacasse/Owl).
-Do not use for official financial, tax, or accounting advice.
+  NOTICE: This repository is an EXPERIMENTAL, UNOFFICIAL personal fork
+  based on GnuCash 5.x. It is NOT affiliated with, endorsed by, or
+  related to:
+    * The official GnuCash project  (https://www.gnucash.org/)
+    * The official Owl project      (https://github.com/mdlacasse/Owl)
 
-Based on GnuCash 5.x.
-------------------------------------------------------------
+  Provided for personal exploration only -- not for official financial,
+  tax, or accounting advice.
 
-##################
-Table of Contents:
-------------------
 
-  - Overview
-  - Retirement Planner (Added Features)
-  - Dependencies
-  - Invocation/running
-  - Internationalization
-  - Building & Installing
-  - Supported Platforms
-  - Additional Download Sites
-  - Getting the Source via Git
-  - Developing GnuCash
+Table of Contents
+-----------------
+  1. Overview
+  2. Retirement Planner (Added Features)
+  3. Dependencies
+  4. Invocation / Running
+  5. Internationalization
+  6. Building & Installing
+  7. Supported Platforms
+  8. Additional Download Sites
+  9. Getting the Source via Git
+ 10. Developing GnuCash
 
-########
+
 Overview
 --------
+GnuCash is a personal and small business double-entry accounting
+application.
 
-GnuCash is a personal and small business double entry accounting application.
+  * Official GnuCash Home : https://www.gnucash.org/
+  * Official GnuCash Wiki : https://wiki.gnucash.org/wiki/GnuCash
+  * Official Downloads    : https://www.gnucash.org/download
 
-Official GnuCash Home Page (upstream):
-https://www.gnucash.org/
 
-Official GnuCash Wiki:
-https://wiki.gnucash.org/wiki/GnuCash
-
-Official Precompiled binaries:
-https://www.gnucash.org/download
-
-####################################
 Retirement Planner (Added Features)
-------------------------------------
+-----------------------------------
+This fork adds a standalone, native C++17 / GTK3 Retirement Planner
+(Tools -> Retirement Planner (Owl)...) inspired by the concepts of
+mdlacasse/Owl (https://github.com/mdlacasse/Owl).
 
-This experimental fork adds a standalone, native C++17/GTK3
-Retirement Planner (Tools -> Retirement Planner (Owl)...) inspired
-by the concepts of mdlacasse/Owl (https://github.com/mdlacasse/Owl).
+  Account Mapping & Persistence
+    * Live GnuCash account balance import mapped into Taxable,
+      Tax-Deferred (401k/IRA), Tax-Free (Roth), HSA, and Excluded
+      buckets, with manual overrides preserved on refresh.
+    * Automatic per-book persistence of planner assumptions, display
+      options, and account bucket overrides via GnuCash book state.
+    * Save Plan As... / Load Plan... (.owlplan / .ini), Reset to
+      Defaults, and Year-by-Year Schedule CSV export (Export CSV...).
 
-Implemented features include:
-  - Live GnuCash account mapping into Taxable, Tax-Deferred (401k/IRA),
-    Tax-Free (Roth), HSA, and Excluded buckets, with manual overrides
-    preserved across account refreshes.
-  - Federal ordinary income tax, LTCG, NIIT, IRMAA Medicare surcharges,
-    and taxable Social Security modeling.
-  - 50-state + DC state income tax modeling (including state retirement
-    and Social Security exemptions).
-  - Pre-Medicare (<65) ACA Marketplace subsidy & 400% FPL cliff modeling.
-  - SECURE 2.0 RMD projections, Roth conversion bracket-fill strategies,
-    Social Security claiming age optimization (62-70), and Baseline vs.
-    Optimized comparison.
-  - Monte Carlo stress testing (success rate and P10/P50/P90 outcomes)
-    and interactive Cairo charts (Today's $ vs. Nominal $).
-  - Automatic per-book persistence of planner assumptions, display
-    options, and account bucket overrides via GnuCash book state.
-  - Save Plan As... / Load Plan... (.owlplan / .ini), Reset to Defaults,
-    and Year-by-Year Schedule CSV export (Export CSV...).
+  Tax, Healthcare & Optimization Engine
+    * Federal ordinary income tax, LTCG, NIIT, IRMAA Medicare
+      surcharges, and taxable Social Security modeling.
+    * 50-state + DC state income tax modeling (including state
+      retirement and Social Security exemptions).
+    * Pre-Medicare (<65) ACA Marketplace subsidy & 400% FPL cliff.
+    * SECURE 2.0 RMD projections, Roth conversion bracket-fill
+      strategies, and Social Security claiming age optimization (62-70).
+    * Baseline vs. Optimized comparison, Monte Carlo stress testing
+      (success rate & P10/P50/P90), and interactive Cairo charts
+      (Today's $ vs. Nominal $).
 
-See ATTRIBUTIONS.md and LICENSE for full upstream repository and license
-accounting.
+  See ATTRIBUTIONS.md and LICENSE for upstream repository and license
+  accounting.
 
 ############
 Dependencies
