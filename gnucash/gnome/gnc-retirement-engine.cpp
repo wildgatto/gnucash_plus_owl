@@ -794,6 +794,94 @@ MonteCarloSummary run_monte_carlo(const PlanInput& input,
     return mc;
 }
 
+std::vector<StressScenarioResult> run_sequence_stress_tests(
+    const PlanInput& input,
+    WithdrawalStrategy strategy,
+    int ss_claim_age,
+    double annual_spending_real,
+    int spouse_ss_claim_age)
+{
+    const int sp_ss = (spouse_ss_claim_age >= 62 && spouse_ss_claim_age <= 70)
+                      ? spouse_ss_claim_age : input.spouse_ss_claim_age;
+    const int n_years = plan_num_years(input);
+    const int ret_idx = std::clamp(input.retirement_age - input.current_age, 0, std::max(0, n_years - 1));
+
+    auto eval = [&](const char* name, const PlanInput& sc_in, const std::vector<double>& rets) {
+        PlanResult r = simulate_with_returns(sc_in, strategy, ss_claim_age, sp_ss, annual_spending_real, rets);
+        StressScenarioResult sr;
+        sr.name = name;
+        sr.feasible = r.plan_feasible;
+        sr.min_spending_real = r.sustainable_spending_real;
+        sr.final_bequest_real = r.final_bequest_real;
+        for (const auto& yp : r.schedule)
+            if (yp.shortfall) ++sr.shortfall_years;
+        return sr;
+    };
+
+    std::vector<StressScenarioResult> out;
+    // 1. Baseline expected return
+    std::vector<double> r_base(static_cast<size_t>(n_years), input.nominal_return);
+    out.push_back(eval("Baseline (Expected Return)", input, r_base));
+
+    // 2. Early Retirement Crash (-25% Yr 1, -10% Yr 2)
+    std::vector<double> r_crash = r_base;
+    if (ret_idx < n_years) r_crash[static_cast<size_t>(ret_idx)] = -0.25;
+    if (ret_idx + 1 < n_years) r_crash[static_cast<size_t>(ret_idx + 1)] = -0.10;
+    out.push_back(eval("Early Crash (-25% / -10% at Retirement)", input, r_crash));
+
+    // 3. Lost Decade (0% nominal return for 5 yrs at retirement)
+    std::vector<double> r_flat = r_base;
+    for (int k = 0; k < 5 && ret_idx + k < n_years; ++k)
+        r_flat[static_cast<size_t>(ret_idx + k)] = 0.0;
+    out.push_back(eval("Lost Decade (0% for 5 yrs at Retirement)", input, r_flat));
+
+    // 4. Stagflation (+2% inflation, -1.5% return)
+    PlanInput stag = input;
+    stag.inflation = std::min(0.15, input.inflation + 0.02);
+    stag.nominal_return = std::max(0.0, input.nominal_return - 0.015);
+    std::vector<double> r_stag(static_cast<size_t>(n_years), stag.nominal_return);
+    out.push_back(eval("Stagflation (+2% Inflation, -1.5% Return)", stag, r_stag));
+
+    return out;
+}
+
+SensitivityMatrix run_sensitivity_matrix(
+    const PlanInput& input,
+    WithdrawalStrategy strategy,
+    int ss_claim_age,
+    double base_spending_real,
+    int spouse_ss_claim_age)
+{
+    const int sp_ss = (spouse_ss_claim_age >= 62 && spouse_ss_claim_age <= 70)
+                      ? spouse_ss_claim_age : input.spouse_ss_claim_age;
+    SensitivityMatrix mat;
+    const double ret_deltas[5] = { -0.02, -0.01, 0.0, 0.01, 0.02 };
+    const double sp_mults[5] = { 0.85, 0.925, 1.00, 1.075, 1.15 };
+
+    for (double d : ret_deltas)
+        mat.return_rates.push_back(std::max(0.0, input.nominal_return + d));
+    for (double m : sp_mults)
+        mat.spending_levels.push_back(std::max(0.0, base_spending_real * m));
+
+    mat.cells.resize(5, std::vector<SensitivityCell>(5));
+    for (size_t r = 0; r < 5; ++r)
+    {
+        PlanInput mod = input;
+        mod.nominal_return = mat.return_rates[r];
+        for (size_t c = 0; c < 5; ++c)
+        {
+            PlanResult pr = simulate_plan(mod, strategy, ss_claim_age, mat.spending_levels[c], sp_ss);
+            SensitivityCell cell;
+            cell.feasible = pr.plan_feasible;
+            cell.final_bequest_real = pr.final_bequest_real;
+            for (const auto& yp : pr.schedule)
+                if (yp.shortfall) ++cell.shortfall_years;
+            mat.cells[r][c] = cell;
+        }
+    }
+    return mat;
+}
+
 PlanResult optimize_plan(const PlanInput& input)
 {
     // Baseline: StandardTaxableFirst at user's specified SS age(s)

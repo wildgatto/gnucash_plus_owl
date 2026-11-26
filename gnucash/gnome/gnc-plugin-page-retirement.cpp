@@ -209,6 +209,9 @@ struct GncPluginPageRetirementPrivate
     GtkTreeModelFilter* acct_filter = nullptr;
     GtkSearchEntry* entry_acct_filter = nullptr;
     GtkLabel* lbl_acct_count = nullptr;
+    GtkListStore* stress_store = nullptr;
+    GtkListStore* sens_store = nullptr;
+    GtkTreeViewColumn* sens_cols[6] = {};
 
     std::vector<MappedAccount> accounts;
     std::vector<CashflowEvent> events;
@@ -952,6 +955,71 @@ run_planner(GncPluginPageRetirementPrivate* priv)
     gtk_label_set_text(priv->lbl_kpi_rec_val, rec_buf);
 
     populate_schedule_and_comparison(priv);
+
+    // Populate Stress Scenarios & 5x5 Sensitivity Matrix
+    if (priv->stress_store && priv->sens_store)
+    {
+        const auto stress = run_sequence_stress_tests(
+            in, res.chosen_strategy, res.chosen_ss_age,
+            res.sustainable_spending_real, res.chosen_spouse_ss_age);
+        gtk_list_store_clear(priv->stress_store);
+        for (const auto& sr : stress)
+        {
+            GtkTreeIter it;
+            gtk_list_store_append(priv->stress_store, &it);
+            gtk_list_store_set(priv->stress_store, &it,
+                               0, sr.name.c_str(),
+                               1, sr.feasible ? _("Pass") : _("Shortfall"),
+                               2, fmt_currency(sr.min_spending_real).c_str(),
+                               3, fmt_currency(sr.final_bequest_real).c_str(),
+                               4, sr.shortfall_years,
+                               5, sr.feasible ? "#2e7d32" : "#c62828",
+                               -1);
+        }
+
+        const auto mat = run_sensitivity_matrix(
+            in, res.chosen_strategy, res.chosen_ss_age,
+            res.sustainable_spending_real, res.chosen_spouse_ss_age);
+        const char* pct_lbls[5] = { "85%", "92.5%", "100%", "107.5%", "115%" };
+        for (size_t c = 0; c < 5 && c < mat.spending_levels.size(); ++c)
+        {
+            if (priv->sens_cols[c + 1])
+            {
+                std::string hdr = std::string(pct_lbls[c]) + " (" + fmt_currency(mat.spending_levels[c]) + ")";
+                gtk_tree_view_column_set_title(priv->sens_cols[c + 1], hdr.c_str());
+            }
+        }
+        gtk_list_store_clear(priv->sens_store);
+        for (size_t r = 0; r < mat.return_rates.size() && r < mat.cells.size(); ++r)
+        {
+            char ret_buf[32];
+            std::snprintf(ret_buf, sizeof(ret_buf), "%.1f%%", mat.return_rates[r] * 100.0);
+            std::string txt[5];
+            const char* bg[5] = {};
+            for (size_t c = 0; c < 5 && c < mat.cells[r].size(); ++c)
+            {
+                const auto& cell = mat.cells[r][c];
+                if (cell.feasible)
+                {
+                    txt[c] = fmt_currency(cell.final_bequest_real);
+                    bg[c] = (r == 2 && c == 2) ? "#c8e6c9" : "#e8f5e9";
+                }
+                else
+                {
+                    txt[c] = "✗ " + std::to_string(cell.shortfall_years) + " yr";
+                    bg[c] = "#ffebee";
+                }
+            }
+            GtkTreeIter it;
+            gtk_list_store_append(priv->sens_store, &it);
+            gtk_list_store_set(priv->sens_store, &it,
+                               0, ret_buf,
+                               1, txt[0].c_str(), 2, txt[1].c_str(), 3, txt[2].c_str(),
+                               4, txt[3].c_str(), 5, txt[4].c_str(),
+                               6, bg[0], 7, bg[1], 8, bg[2], 9, bg[3], 10, bg[4],
+                               -1);
+        }
+    }
 
     if (priv->chart_area)
         gtk_widget_queue_draw(GTK_WIDGET(priv->chart_area));
@@ -2162,6 +2230,87 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_box_pack_start(GTK_BOX(tab_acct), acct_scroll, TRUE, TRUE, 0);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_acct, gtk_label_new(_("Account Mapping")));
 
+    // Tab 5: Sequence-of-Returns Stress Test & Sensitivity Matrix
+    GtkWidget* tab_stress = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(tab_stress), 8);
+
+    GtkWidget* lbl_st_hdr = gtk_label_new(_("Sequence-of-Returns & Inflation Stress Scenarios"));
+    gtk_widget_set_halign(lbl_st_hdr, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(lbl_st_hdr), "gnc-class-strong");
+    gtk_box_pack_start(GTK_BOX(tab_stress), lbl_st_hdr, FALSE, FALSE, 0);
+
+    priv->stress_store = gtk_list_store_new(6,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING);
+    GtkWidget* stress_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->stress_store));
+    const char* stress_titles[] = {
+        "Scenario", "Status", "Min Spend / yr", "Final Bequest (Today $)", "Shortfall Yrs"
+    };
+    for (int c = 0; c < 5; ++c)
+    {
+        GtkCellRenderer* rend = gtk_cell_renderer_text_new();
+        g_object_set(rend, "xalign", (c >= 2) ? 1.0f : 0.0f, nullptr);
+        GtkTreeViewColumn* col = nullptr;
+        if (c == 1)
+        {
+            col = gtk_tree_view_column_new_with_attributes(
+                stress_titles[c], rend, "text", c, "foreground", 5, nullptr);
+        }
+        else
+        {
+            col = gtk_tree_view_column_new_with_attributes(
+                stress_titles[c], rend, "text", c, nullptr);
+        }
+        if (c == 0) gtk_tree_view_column_set_expand(col, TRUE);
+        gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(stress_tv), col);
+    }
+    GtkWidget* stress_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(stress_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(stress_scroll), 140);
+    gtk_container_add(GTK_CONTAINER(stress_scroll), stress_tv);
+    gtk_box_pack_start(GTK_BOX(tab_stress), stress_scroll, FALSE, TRUE, 0);
+
+    GtkWidget* lbl_sens_hdr = gtk_label_new(_("Sensitivity Matrix: Expected Return vs. Annual Spending (Bequest or Shortfall Years)"));
+    gtk_widget_set_halign(lbl_sens_hdr, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(lbl_sens_hdr), "gnc-class-strong");
+    gtk_box_pack_start(GTK_BOX(tab_stress), lbl_sens_hdr, FALSE, FALSE, 4);
+
+    priv->sens_store = gtk_list_store_new(11,
+        G_TYPE_STRING,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkWidget* sens_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->sens_store));
+    const char* sens_init_titles[6] = { "Return \\ Spend", "85%", "92.5%", "100%", "107.5%", "115%" };
+    for (int c = 0; c < 6; ++c)
+    {
+        GtkCellRenderer* rend = gtk_cell_renderer_text_new();
+        g_object_set(rend, "xalign", (c >= 1) ? 1.0f : 0.5f, nullptr);
+        GtkTreeViewColumn* col = nullptr;
+        if (c == 0)
+        {
+            col = gtk_tree_view_column_new_with_attributes(sens_init_titles[c], rend, "text", 0, nullptr);
+        }
+        else
+        {
+            g_object_set(rend, "foreground", "#1b1b1b", nullptr);
+            col = gtk_tree_view_column_new_with_attributes(
+                sens_init_titles[c], rend, "text", c, "cell-background", 5 + c, nullptr);
+        }
+        gtk_tree_view_column_set_expand(col, TRUE);
+        gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(sens_tv), col);
+        priv->sens_cols[c] = col;
+    }
+    GtkWidget* sens_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sens_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(sens_scroll), 160);
+    gtk_container_add(GTK_CONTAINER(sens_scroll), sens_tv);
+    gtk_box_pack_start(GTK_BOX(tab_stress), sens_scroll, TRUE, TRUE, 0);
+
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_stress, gtk_label_new(_("Stress & Sensitivity")));
+
     priv->root_widget = outer;
     gtk_widget_show_all(priv->root_widget);
 
@@ -2185,11 +2334,15 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         g_object_unref(priv->acct_filter);
         g_object_unref(priv->acct_store);
         g_object_unref(priv->event_store);
+        g_object_unref(priv->stress_store);
+        g_object_unref(priv->sens_store);
         priv->sched_store = nullptr;
         priv->cmp_store = nullptr;
         priv->acct_filter = nullptr;
         priv->acct_store = nullptr;
         priv->event_store = nullptr;
+        priv->stress_store = nullptr;
+        priv->sens_store = nullptr;
         priv->event_tv = nullptr;
         priv->entry_acct_filter = nullptr;
         priv->lbl_acct_count = nullptr;

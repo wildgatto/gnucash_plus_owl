@@ -378,3 +378,40 @@ TEST(RetirementEngine, SpendingPhasesAndLumpSumEvents)
     EXPECT_DOUBLE_EQ(out.events[0].amount_real, 250000.0);
     EXPECT_EQ(out.events[1].bucket, TaxBucket::TaxFree);
 }
+
+TEST(RetirementEngine, SequenceStressTestsAndSensitivityMatrix)
+{
+    PlanInput in;
+    in.current_age = 62;
+    in.retirement_age = 65;
+    in.horizon_age = 90;
+    in.initial_balances.taxable = 400000.0;
+    in.initial_balances.tax_deferred = 700000.0;
+    in.ss_fra_annual = 32000.0;
+    in.optimize_ss_age = false;
+    in.strategy = WithdrawalStrategy::StandardTaxableFirst;
+    in.monte_carlo_trials = 20;
+
+    PlanResult res = optimize_plan(in);
+    ASSERT_TRUE(res.plan_feasible);
+
+    auto stress = run_sequence_stress_tests(
+        in, res.chosen_strategy, res.chosen_ss_age, res.sustainable_spending_real);
+    ASSERT_EQ(stress.size(), 4u);
+    EXPECT_TRUE(stress[0].feasible);
+    // Severe early crash or stagflation should reduce bequest vs baseline expected return
+    EXPECT_LT(stress[1].final_bequest_real, stress[0].final_bequest_real);
+    EXPECT_LT(stress[3].final_bequest_real, stress[0].final_bequest_real);
+
+    auto mat = run_sensitivity_matrix(
+        in, res.chosen_strategy, res.chosen_ss_age, res.sustainable_spending_real);
+    ASSERT_EQ(mat.return_rates.size(), 5u);
+    ASSERT_EQ(mat.spending_levels.size(), 5u);
+    ASSERT_EQ(mat.cells.size(), 5u);
+    // Higher return & lower spending (row 4, col 0) should be feasible with larger bequest than center (2,2)
+    EXPECT_TRUE(mat.cells[4][0].feasible);
+    EXPECT_GT(mat.cells[4][0].final_bequest_real, mat.cells[2][2].final_bequest_real);
+    // Lower return & higher spending (row 0, col 4) should show shortfall
+    EXPECT_FALSE(mat.cells[0][4].feasible);
+    EXPECT_GT(mat.cells[0][4].shortfall_years, 0);
+}

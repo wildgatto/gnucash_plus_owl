@@ -227,6 +227,29 @@ struct MonteCarloSummary
     std::vector<double> p90_real;
 };
 
+struct StressScenarioResult
+{
+    std::string name;
+    bool feasible = true;
+    double min_spending_real = 0.0;
+    double final_bequest_real = 0.0;
+    int shortfall_years = 0;
+};
+
+struct SensitivityCell
+{
+    bool feasible = true;
+    double final_bequest_real = 0.0;
+    int shortfall_years = 0;
+};
+
+struct SensitivityMatrix
+{
+    std::vector<double> return_rates;    // 5 rows (nominal return)
+    std::vector<double> spending_levels; // 5 cols (annual spending in today's $)
+    std::vector<std::vector<SensitivityCell>> cells; // [row][col]
+};
+
 struct PlanResult
 {
     WithdrawalStrategy chosen_strategy = WithdrawalStrategy::StandardTaxableFirst;
@@ -274,6 +297,22 @@ MonteCarloSummary run_monte_carlo(const PlanInput& input,
                                   int ss_claim_age,
                                   double annual_spending_real,
                                   int spouse_ss_claim_age = -1);
+
+/** Run sequence-of-returns and stagflation stress scenarios. */
+std::vector<StressScenarioResult> run_sequence_stress_tests(
+    const PlanInput& input,
+    WithdrawalStrategy strategy,
+    int ss_claim_age,
+    double annual_spending_real,
+    int spouse_ss_claim_age = -1);
+
+/** Compute a 5x5 Return vs. Spending sensitivity matrix. */
+SensitivityMatrix run_sensitivity_matrix(
+    const PlanInput& input,
+    WithdrawalStrategy strategy,
+    int ss_claim_age,
+    double base_spending_real,
+    int spouse_ss_claim_age = -1);
 
 /** Human-readable name for a WithdrawalStrategy. */
 const char* strategy_label(WithdrawalStrategy s) noexcept;
