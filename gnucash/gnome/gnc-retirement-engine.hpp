@@ -180,6 +180,30 @@ struct PlanInput
     // RMD & Income Floor enhancements
     bool reinvest_rmd_surplus = true;  // Re-invest after-tax RMD/income surplus into taxable bucket
     double tips_floor_annual = 0.0;    // Optional inflation-adjusted TIPS/annuity floor (today's $)
+
+    // Guyton-Klinger Guardrails (dynamic spending adjustment)
+    bool enable_guardrails = false;
+    double guardrail_upper_wr = 0.060; // Trim spending if withdrawal rate > 6.0%
+    double guardrail_lower_wr = 0.040; // Boost spending if withdrawal rate < 4.0%
+    double guardrail_adj_pct = 0.10;   // +/- 10% adjustment per trigger
+
+    // Fixed Nominal Debt / Mortgage Payoff (non-inflating)
+    double debt_annual_payment = 0.0;  // Fixed nominal $/yr
+    int debt_payoff_age = 68;          // Stops when primary reaches this age
+
+    // Long-Term Care (LTC) Late-Life Shock
+    int ltc_start_age = 82;
+    int ltc_years = 0;                 // 0 = disabled
+    double ltc_annual_cost_real = 65000.0;
+
+    // Asset Allocation Glide Path (optional)
+    bool enable_glide_path = false;
+    double equity_pct_pre_ret = 80.0;  // % equities before retirement
+    double equity_pct_in_ret = 55.0;   // % equities in retirement
+    double equity_return = 0.085;      // 8.5% nominal equity return
+    double bond_return = 0.040;        // 4.0% nominal bond return
+    double equity_vol = 0.16;          // 16% equity std dev
+    double bond_vol = 0.05;            // 5% bond std dev
 };
 
 struct YearProjection
@@ -224,6 +248,8 @@ struct YearProjection
     double rmd_reinvested = 0.0;           // After-tax RMD/income surplus reinvested in taxable (nominal)
     double guaranteed_floor_nominal = 0.0; // SS + Pension + TIPS floor (nominal)
     double floor_surplus_nominal = 0.0;    // guaranteed_floor - target_spending (nominal; <0 = gap)
+    int marginal_bracket_pct = 0;          // Federal ordinary marginal bracket (10..37%)
+    int irmaa_tier = 0;                    // Medicare IRMAA tier (0 = none, 1..4)
     bool shortfall = false;
 };
 
@@ -273,6 +299,23 @@ struct SsBreakEvenRow
     int breakeven_vs_62 = 0;                // Age where cumulative >= claiming at 62 (0 if never)
     int breakeven_vs_67 = 0;                // Age where cumulative >= claiming at 67 (0 if never)
     std::vector<double> cumulative_at_ages; // Cumulative real $ at ages {65,70,75,80,85,90,95}
+};
+
+struct HistoricalBacktestResult
+{
+    std::string name;
+    int start_year = 1928;
+    bool feasible = true;
+    double min_spending_real = 0.0;
+    double final_bequest_real = 0.0;
+    int shortfall_years = 0;
+};
+
+struct HistoricalSummary
+{
+    int total_cycles = 0;
+    double rolling_success_rate = 0.0;
+    std::vector<HistoricalBacktestResult> scenarios; // Key historical crisis starts + worst cycle
 };
 
 struct PlanResult
@@ -341,6 +384,14 @@ SensitivityMatrix run_sensitivity_matrix(
 
 /** Compute Social Security break-even analysis across claiming ages 62..70. */
 std::vector<SsBreakEvenRow> compute_ss_breakeven(const PlanInput& input);
+
+/** Run historical market backtests (rolling 1928-2024 cycles + major crisis starts). */
+HistoricalSummary run_historical_backtests(
+    const PlanInput& input,
+    WithdrawalStrategy strategy,
+    int ss_claim_age,
+    double annual_spending_real,
+    int spouse_ss_claim_age = -1);
 
 /** Human-readable name for a WithdrawalStrategy. */
 const char* strategy_label(WithdrawalStrategy s) noexcept;

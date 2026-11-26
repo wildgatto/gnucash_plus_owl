@@ -40,15 +40,16 @@ Available under **Tools → Retirement Planner (Owl)...**, this standalone modul
 
 ### Tax, Healthcare & Optimization Engine
 - **Two-Person Household (Spouse / Partner):** Optional spouse age/horizon/contributions, independent Social Security & pension modeling, survivor benefits, and joint SS claiming optimization.
-- **Spending Phases & One-Time Cashflow Events:** Go-Go / Slow-Go / No-Go spending phase multipliers and custom lump-sum windfalls or expenses (e.g., home downsize, inheritance, college, mortgage payoff).
+- **Spending Phases, Debt, LTC & One-Time Events:** Go-Go / Slow-Go / No-Go spending phase multipliers, fixed nominal debt/mortgage payoff schedules, late-life Long-Term Care (LTC) shock modeling, and custom lump-sum windfalls or expenses.
+- **Asset Allocation Glide Path & Guardrails:** Optional pre-retirement to in-retirement equity/bond glide path driving expected return/volatility, plus Guyton-Klinger spending guardrails (±10%).
 - **Custom Cost Basis & Per-Bucket Returns:** Configurable initial taxable cost-basis percentage (`%`) for LTCG estimation and independent expected return rates per tax bucket (`Taxable`, `401k/IRA`, `Roth`, `HSA`).
-- **Federal Taxes & Medicare:** Ordinary income tax, LTCG, NIIT, IRMAA Medicare surcharges, and taxable Social Security calculation.
+- **Federal Taxes, Brackets & Medicare:** Ordinary income tax, LTCG, NIIT, IRMAA Medicare surcharges, taxable Social Security calculation, and year-by-year **Bracket / IRMAA** tier diagnostics.
 - **50-State + DC Tax Modeling:** State income tax rules including state retirement-income and Social Security exemptions.
 - **Pre-Medicare ACA Modeling:** Pre-65 ACA Marketplace subsidies and optional 400% FPL cliff enforcement.
 - **RMD Re-investment, Income Floor & Roth/SS Optimization:** SECURE 2.0 RMD projections with optional after-tax RMD surplus re-investment into the taxable bucket, optional inflation-adjusted TIPS/annuity income floor tracking, Roth conversion bracket-fill strategies (`12%`, `22%`, `24%`), and Social Security claiming age optimization (`62–70`).
 - **Interactive Charts, Stress Testing & Break-Even Analysis:**
   - **5 Chart Modes with Hover Tooltips:** `Portfolio by Tax Bucket`, `Income & Withdrawals`, `Taxes, RMDs & Roth Conv`, `Monte Carlo Fan (P10–P90)`, and `Tax & Healthcare Breakdown`.
-  - **Stress & Sensitivity Tab:** Sequence-of-returns stress scenarios (Early Crash, Lost Decade, Stagflation) and a 5×5 Return vs. Spending sensitivity matrix.
+  - **Stress & Sensitivity Tab:** Sequence-of-returns stress scenarios (Early Crash, Lost Decade, Stagflation), a 5×5 Return vs. Spending sensitivity matrix, and **Historical Market Backtests (1928–2024)** across 97 rolling cycles.
   - **SS Break-Even Tab:** Cumulative Social Security benefits across claiming ages `62–70` with break-even ages vs. 62 and 67.
 
 ---

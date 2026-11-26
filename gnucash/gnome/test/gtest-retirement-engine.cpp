@@ -542,3 +542,65 @@ TEST(RetirementEngine, RmdReinvestmentIncomeFloorSsBreakEvenAndHtmlReport)
     EXPECT_TRUE(rt.reinvest_rmd_surplus);
     EXPECT_DOUBLE_EQ(rt.tips_floor_annual, 20000.0);
 }
+
+TEST(RetirementEngine, GuardrailsDebtLtcGlidePathBracketsAndHistoricalBacktests)
+{
+    PlanInput base;
+    base.current_age = 62;
+    base.retirement_age = 65;
+    base.horizon_age = 90;
+    base.initial_balances.taxable = 400000.0;
+    base.initial_balances.tax_deferred = 700000.0;
+    base.ss_fra_annual = 30000.0;
+    base.optimize_ss_age = false;
+    base.strategy = WithdrawalStrategy::StandardTaxableFirst;
+    base.monte_carlo_trials = 20;
+
+    // 1. Marginal bracket & IRMAA tier populated on schedule
+    PlanResult r_base = simulate_plan(base, WithdrawalStrategy::StandardTaxableFirst, 67, 65000.0);
+    ASSERT_FALSE(r_base.schedule.empty());
+    EXPECT_GE(r_base.schedule.back().marginal_bracket_pct, 10);
+    EXPECT_GE(r_base.schedule.back().irmaa_tier, 0);
+
+    // 2. Fixed nominal debt and LTC late-life shock reduce final bequest
+    PlanInput debt_ltc = base;
+    debt_ltc.debt_annual_payment = 18000.0;
+    debt_ltc.debt_payoff_age = 70;
+    debt_ltc.ltc_start_age = 82;
+    debt_ltc.ltc_years = 3;
+    debt_ltc.ltc_annual_cost_real = 65000.0;
+    PlanResult r_dl = simulate_plan(debt_ltc, WithdrawalStrategy::StandardTaxableFirst, 67, 65000.0);
+    EXPECT_LT(r_dl.final_bequest_real, r_base.final_bequest_real);
+
+    // 3. Glide path + Guardrails
+    PlanInput gp = base;
+    gp.enable_glide_path = true;
+    gp.equity_pct_pre_ret = 85.0;
+    gp.equity_pct_in_ret = 50.0;
+    gp.enable_guardrails = true;
+    PlanResult r_gp = simulate_plan(gp, WithdrawalStrategy::StandardTaxableFirst, 67, 65000.0);
+    EXPECT_TRUE(r_gp.plan_feasible);
+
+    // 4. Historical backtests (1928-2024)
+    auto hist = run_historical_backtests(base, WithdrawalStrategy::StandardTaxableFirst, 67, 65000.0);
+    EXPECT_EQ(hist.total_cycles, 97);
+    EXPECT_GT(hist.rolling_success_rate, 0.5);
+    ASSERT_EQ(hist.scenarios.size(), 6u);
+
+    // 5. INI round-trip for all new fields
+    debt_ltc.enable_guardrails = true;
+    debt_ltc.enable_glide_path = true;
+    debt_ltc.equity_pct_pre_ret = 85.0;
+    debt_ltc.equity_pct_in_ret = 50.0;
+    std::string ini = serialize_plan_ini(debt_ltc);
+    PlanInput rt;
+    std::vector<std::pair<std::string, TaxBucket>> ov;
+    ASSERT_TRUE(deserialize_plan_ini(ini, rt, ov));
+    EXPECT_TRUE(rt.enable_guardrails);
+    EXPECT_TRUE(rt.enable_glide_path);
+    EXPECT_DOUBLE_EQ(rt.equity_pct_pre_ret, 85.0);
+    EXPECT_DOUBLE_EQ(rt.debt_annual_payment, 18000.0);
+    EXPECT_EQ(rt.debt_payoff_age, 70);
+    EXPECT_EQ(rt.ltc_start_age, 82);
+    EXPECT_EQ(rt.ltc_years, 3);
+}

@@ -85,6 +85,7 @@ enum
     COL_NET_SPEND,
     COL_FLOOR_GAP,
     COL_RMD_REINV,
+    COL_BRACKET_IRMAA,
     NUM_SCHED_COLS
 };
 
@@ -175,6 +176,10 @@ struct GncPluginPageRetirementPrivate
     GtkSpinButton* spin_aca_bench = nullptr;
     GtkCheckButton* chk_aca_cliff = nullptr;
     GtkCheckButton* chk_reinvest_rmd = nullptr;
+    GtkCheckButton* chk_enable_guardrails = nullptr;
+    GtkCheckButton* chk_enable_glide = nullptr;
+    GtkSpinButton* spin_eq_pre = nullptr;
+    GtkSpinButton* spin_eq_in = nullptr;
     GtkSpinButton* spin_tips_floor = nullptr;
     GtkSpinButton* spin_mc_trials = nullptr;
 
@@ -198,6 +203,11 @@ struct GncPluginPageRetirementPrivate
     GtkSpinButton* spin_slow_go_pct = nullptr;
     GtkSpinButton* spin_no_go_age = nullptr;
     GtkSpinButton* spin_no_go_pct = nullptr;
+    GtkSpinButton* spin_debt_pmt = nullptr;
+    GtkSpinButton* spin_debt_age = nullptr;
+    GtkSpinButton* spin_ltc_age = nullptr;
+    GtkSpinButton* spin_ltc_yrs = nullptr;
+    GtkSpinButton* spin_ltc_cost = nullptr;
     GtkListStore* event_store = nullptr;
     GtkTreeView* event_tv = nullptr;
 
@@ -225,6 +235,8 @@ struct GncPluginPageRetirementPrivate
     GtkLabel* lbl_acct_count = nullptr;
     GtkListStore* stress_store = nullptr;
     GtkListStore* sens_store = nullptr;
+    GtkListStore* hist_store = nullptr;
+    GtkLabel* lbl_hist_summary = nullptr;
     GtkListStore* ss_be_store = nullptr;
     GtkTreeViewColumn* sens_cols[6] = {};
 
@@ -434,6 +446,12 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
         const auto& yp = res.schedule[i];
         const double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(i)) : 1.0;
 
+        char brk_buf[24];
+        if (yp.irmaa_tier > 0)
+            std::snprintf(brk_buf, sizeof(brk_buf), "%d%% / T%d", yp.marginal_bracket_pct, yp.irmaa_tier);
+        else
+            std::snprintf(brk_buf, sizeof(brk_buf), "%d%%", yp.marginal_bracket_pct);
+
         GtkTreeIter iter;
         gtk_list_store_append(priv->sched_store, &iter);
         gtk_list_store_set(priv->sched_store, &iter,
@@ -451,6 +469,7 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
                            COL_NET_SPEND, fmt_table_dollar(yp.net_spending_nominal / div).c_str(),
                            COL_FLOOR_GAP, fmt_table_dollar(yp.floor_surplus_nominal / div).c_str(),
                            COL_RMD_REINV, fmt_table_dollar(yp.rmd_reinvested / div).c_str(),
+                           COL_BRACKET_IRMAA, brk_buf,
                            -1);
     }
 
@@ -555,6 +574,10 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.aca_benchmark_premium = gtk_spin_button_get_value(priv->spin_aca_bench);
     in.aca_enforce_400_cliff = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff));
     in.reinvest_rmd_surplus = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd));
+    in.enable_guardrails = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_enable_guardrails));
+    in.enable_glide_path = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_enable_glide));
+    in.equity_pct_pre_ret = gtk_spin_button_get_value(priv->spin_eq_pre);
+    in.equity_pct_in_ret = gtk_spin_button_get_value(priv->spin_eq_in);
     in.tips_floor_annual = gtk_spin_button_get_value(priv->spin_tips_floor);
     in.monte_carlo_trials = gtk_spin_button_get_value_as_int(priv->spin_mc_trials);
 
@@ -576,6 +599,11 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.slow_go_pct = gtk_spin_button_get_value(priv->spin_slow_go_pct);
     in.no_go_age = std::max(in.slow_go_age, gtk_spin_button_get_value_as_int(priv->spin_no_go_age));
     in.no_go_pct = gtk_spin_button_get_value(priv->spin_no_go_pct);
+    in.debt_annual_payment = gtk_spin_button_get_value(priv->spin_debt_pmt);
+    in.debt_payoff_age = gtk_spin_button_get_value_as_int(priv->spin_debt_age);
+    in.ltc_start_age = gtk_spin_button_get_value_as_int(priv->spin_ltc_age);
+    in.ltc_years = gtk_spin_button_get_value_as_int(priv->spin_ltc_yrs);
+    in.ltc_annual_cost_real = gtk_spin_button_get_value(priv->spin_ltc_cost);
     in.events = priv->events;
     return in;
 }
@@ -659,6 +687,10 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_spin_button_set_value(priv->spin_aca_bench, in.aca_benchmark_premium);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff), in.aca_enforce_400_cliff);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd), in.reinvest_rmd_surplus);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_enable_guardrails), in.enable_guardrails);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_enable_glide), in.enable_glide_path);
+    gtk_spin_button_set_value(priv->spin_eq_pre, in.equity_pct_pre_ret);
+    gtk_spin_button_set_value(priv->spin_eq_in, in.equity_pct_in_ret);
     gtk_spin_button_set_value(priv->spin_tips_floor, in.tips_floor_annual);
     gtk_spin_button_set_value(priv->spin_mc_trials, in.monte_carlo_trials);
 
@@ -681,6 +713,11 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_spin_button_set_value(priv->spin_slow_go_pct, in.slow_go_pct);
     gtk_spin_button_set_value(priv->spin_no_go_age, in.no_go_age);
     gtk_spin_button_set_value(priv->spin_no_go_pct, in.no_go_pct);
+    gtk_spin_button_set_value(priv->spin_debt_pmt, in.debt_annual_payment);
+    gtk_spin_button_set_value(priv->spin_debt_age, in.debt_payoff_age);
+    gtk_spin_button_set_value(priv->spin_ltc_age, in.ltc_start_age);
+    gtk_spin_button_set_value(priv->spin_ltc_yrs, in.ltc_years);
+    gtk_spin_button_set_value(priv->spin_ltc_cost, in.ltc_annual_cost_real);
     priv->events = in.events;
     sync_event_store(priv);
 }
@@ -782,7 +819,16 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     g_key_file_set_double(state, STATE_GROUP_PLAN, "aca_benchmark_premium", in.aca_benchmark_premium);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "aca_enforce_400_cliff", in.aca_enforce_400_cliff);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "reinvest_rmd_surplus", in.reinvest_rmd_surplus);
+    g_key_file_set_boolean(state, STATE_GROUP_PLAN, "enable_guardrails", in.enable_guardrails);
+    g_key_file_set_boolean(state, STATE_GROUP_PLAN, "enable_glide_path", in.enable_glide_path);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "equity_pct_pre_ret", in.equity_pct_pre_ret);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "equity_pct_in_ret", in.equity_pct_in_ret);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "tips_floor_annual", in.tips_floor_annual);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "debt_annual_payment", in.debt_annual_payment);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "debt_payoff_age", in.debt_payoff_age);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "ltc_start_age", in.ltc_start_age);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "ltc_years", in.ltc_years);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "ltc_annual_cost_real", in.ltc_annual_cost_real);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "monte_carlo_trials", in.monte_carlo_trials);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "has_spouse", in.has_spouse);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_current_age", in.spouse_current_age);
@@ -927,7 +973,16 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.aca_benchmark_premium = std::max(0.0, get_dbl("aca_benchmark_premium", in.aca_benchmark_premium));
     in.aca_enforce_400_cliff = get_bool("aca_enforce_400_cliff", in.aca_enforce_400_cliff);
     in.reinvest_rmd_surplus = get_bool("reinvest_rmd_surplus", in.reinvest_rmd_surplus);
+    in.enable_guardrails = get_bool("enable_guardrails", in.enable_guardrails);
+    in.enable_glide_path = get_bool("enable_glide_path", in.enable_glide_path);
+    in.equity_pct_pre_ret = std::clamp(get_dbl("equity_pct_pre_ret", in.equity_pct_pre_ret), 0.0, 100.0);
+    in.equity_pct_in_ret = std::clamp(get_dbl("equity_pct_in_ret", in.equity_pct_in_ret), 0.0, 100.0);
     in.tips_floor_annual = std::max(0.0, get_dbl("tips_floor_annual", in.tips_floor_annual));
+    in.debt_annual_payment = std::max(0.0, get_dbl("debt_annual_payment", in.debt_annual_payment));
+    in.debt_payoff_age = std::clamp(get_int("debt_payoff_age", in.debt_payoff_age), 30, 110);
+    in.ltc_start_age = std::clamp(get_int("ltc_start_age", in.ltc_start_age), 50, 110);
+    in.ltc_years = std::clamp(get_int("ltc_years", in.ltc_years), 0, 20);
+    in.ltc_annual_cost_real = std::max(0.0, get_dbl("ltc_annual_cost_real", in.ltc_annual_cost_real));
     in.monte_carlo_trials = std::clamp(get_int("monte_carlo_trials", in.monte_carlo_trials), 50, 1000);
     in.has_spouse = get_bool("has_spouse", in.has_spouse);
     in.spouse_current_age = std::clamp(get_int("spouse_current_age", in.spouse_current_age), 18, 95);
@@ -1202,6 +1257,36 @@ run_planner(GncPluginPageRetirementPrivate* priv)
                                1, txt[0].c_str(), 2, txt[1].c_str(), 3, txt[2].c_str(),
                                4, txt[3].c_str(), 5, txt[4].c_str(),
                                6, bg[0], 7, bg[1], 8, bg[2], 9, bg[3], 10, bg[4],
+                               -1);
+        }
+    }
+
+    if (priv->hist_store)
+    {
+        auto hist = run_historical_backtests(
+            in, res.chosen_strategy, res.chosen_ss_age,
+            res.sustainable_spending_real, res.chosen_spouse_ss_age);
+        if (priv->lbl_hist_summary)
+        {
+            char hbuf[128];
+            std::snprintf(hbuf, sizeof(hbuf),
+                          "Historical Backtests (1928-2024): %.1f%% success across %d rolling cycles",
+                          hist.rolling_success_rate * 100.0, hist.total_cycles);
+            gtk_label_set_text(priv->lbl_hist_summary, hbuf);
+        }
+        gtk_list_store_clear(priv->hist_store);
+        for (const auto& sc : hist.scenarios)
+        {
+            GtkTreeIter it;
+            gtk_list_store_append(priv->hist_store, &it);
+            gtk_list_store_set(priv->hist_store, &it,
+                               0, sc.name.c_str(),
+                               1, std::to_string(sc.start_year).c_str(),
+                               2, sc.feasible ? "✓ Pass" : "✗ Shortfall",
+                               3, fmt_currency(sc.min_spending_real).c_str(),
+                               4, fmt_currency(sc.final_bequest_real).c_str(),
+                               5, std::to_string(sc.shortfall_years).c_str(),
+                               6, sc.feasible ? "#e8f5e9" : "#ffebee",
                                -1);
         }
     }
@@ -2424,6 +2509,14 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_reinvest_rmd), TRUE);
     gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_reinvest_rmd), 0, r3++, 2, 1);
 
+    priv->chk_enable_guardrails = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Guyton-Klinger Guardrails (+/-10%)")));
+    gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_enable_guardrails), 0, r3++, 2, 1);
+
+    priv->chk_enable_glide = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Use Equity/Bond Glide Path")));
+    gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_enable_glide), 0, r3++, 2, 1);
+    priv->spin_eq_pre = add_spin_row(g_mkt, r3, _("Pre-Retire Equity (%)"), 0, 100, 5, 80);
+    priv->spin_eq_in = add_spin_row(g_mkt, r3, _("In-Retire Equity (%)"), 0, 100, 5, 55);
+
     priv->spin_mc_trials = add_spin_row(g_mkt, r3, _("Monte Carlo Trials"), 50, 1000, 50, 300);
 
     // Sub-tab 4: Spouse / Partner
@@ -2469,6 +2562,11 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
         priv->spin_slow_go_pct = add_spin_row(g_ph, r5, _("Slow-Go Spend (%)"), 20, 150, 5, 100);
         priv->spin_no_go_age = add_spin_row(g_ph, r5, _("No-Go Age"), 55, 110, 1, 85);
         priv->spin_no_go_pct = add_spin_row(g_ph, r5, _("No-Go Spend (%)"), 20, 150, 5, 100);
+        priv->spin_debt_pmt = add_spin_row(g_ph, r5, _("Fixed Debt/Mort ($/yr)"), 0, 200000, 1000, 0);
+        priv->spin_debt_age = add_spin_row(g_ph, r5, _("Debt Payoff Age"), 30, 110, 1, 68);
+        priv->spin_ltc_age = add_spin_row(g_ph, r5, _("LTC Start Age"), 50, 110, 1, 82);
+        priv->spin_ltc_yrs = add_spin_row(g_ph, r5, _("LTC Duration (yrs)"), 0, 20, 1, 0);
+        priv->spin_ltc_cost = add_spin_row(g_ph, r5, _("LTC Cost ($/yr)"), 0, 300000, 5000, 65000);
         gtk_box_pack_start(GTK_BOX(ph_box), GTK_WIDGET(g_ph), FALSE, FALSE, 0);
 
         GtkWidget* ev_hdr = gtk_label_new(_("One-Time Events (Windfalls / Expenses)"));
@@ -2558,12 +2656,12 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
         G_TYPE_INT, G_TYPE_INT,
         G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
         G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
-        G_TYPE_STRING, G_TYPE_STRING);
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     GtkWidget* sched_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->sched_store));
     const char* sched_titles[] = {
         "Year", "Age", "Total", "Taxable", "401k/IRA", "Roth",
         "HSA", "SS+Pens", "RMD", "Roth Conv", "Tax", "Net Spend",
-        "Floor Gap", "RMD Reinv"
+        "Floor Gap", "RMD Reinv", "Bracket / IRMAA"
     };
     for (int c = 0; c < NUM_SCHED_COLS; ++c)
     {
@@ -2765,6 +2863,42 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_container_add(GTK_CONTAINER(sens_scroll), sens_tv);
     gtk_box_pack_start(GTK_BOX(tab_stress), sens_scroll, TRUE, TRUE, 0);
 
+    priv->lbl_hist_summary = GTK_LABEL(gtk_label_new(_("Historical Backtests (1928-2024)")));
+    gtk_widget_set_halign(GTK_WIDGET(priv->lbl_hist_summary), GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(GTK_WIDGET(priv->lbl_hist_summary)), "gnc-class-strong");
+    gtk_box_pack_start(GTK_BOX(tab_stress), GTK_WIDGET(priv->lbl_hist_summary), FALSE, FALSE, 4);
+
+    priv->hist_store = gtk_list_store_new(7,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+        G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkWidget* hist_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->hist_store));
+    const char* hist_titles[6] = { "Historical Cycle", "Start", "Status", "Min Spend/yr", "Final Bequest", "Shortfall Yrs" };
+    for (int c = 0; c < 6; ++c)
+    {
+        GtkCellRenderer* rend = gtk_cell_renderer_text_new();
+        g_object_set(rend, "xalign", (c >= 3) ? 1.0f : 0.0f, nullptr);
+        GtkTreeViewColumn* col = nullptr;
+        if (c == 2)
+        {
+            g_object_set(rend, "foreground", "#1b1b1b", nullptr);
+            col = gtk_tree_view_column_new_with_attributes(
+                hist_titles[c], rend, "text", c, "cell-background", 6, nullptr);
+        }
+        else
+        {
+            col = gtk_tree_view_column_new_with_attributes(hist_titles[c], rend, "text", c, nullptr);
+        }
+        gtk_tree_view_column_set_expand(col, c == 0);
+        gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(hist_tv), col);
+    }
+    GtkWidget* hist_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(hist_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(hist_scroll), 150);
+    gtk_container_add(GTK_CONTAINER(hist_scroll), hist_tv);
+    gtk_box_pack_start(GTK_BOX(tab_stress), hist_scroll, FALSE, TRUE, 0);
+
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_stress, gtk_label_new(_("Stress & Sensitivity")));
 
     // Tab 6: Social Security Break-Even Analysis
@@ -2832,6 +2966,7 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         g_object_unref(priv->event_store);
         g_object_unref(priv->stress_store);
         g_object_unref(priv->sens_store);
+        g_object_unref(priv->hist_store);
         g_object_unref(priv->ss_be_store);
         priv->sched_store = nullptr;
         priv->cmp_store = nullptr;
@@ -2840,6 +2975,8 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         priv->event_store = nullptr;
         priv->stress_store = nullptr;
         priv->sens_store = nullptr;
+        priv->hist_store = nullptr;
+        priv->lbl_hist_summary = nullptr;
         priv->ss_be_store = nullptr;
         priv->event_tv = nullptr;
         priv->entry_acct_filter = nullptr;

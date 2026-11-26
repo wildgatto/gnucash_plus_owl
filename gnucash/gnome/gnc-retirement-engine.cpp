@@ -218,8 +218,55 @@ struct TaxBreakdown
     double state = 0.0;
     double irmaa = 0.0;
     double aca = 0.0;
+    int marginal_bracket_pct = 10;
+    int irmaa_tier = 0;
     double total() const noexcept { return ordinary + ltcg + niit + state + irmaa + aca; }
 };
+
+int marginal_ordinary_pct(double taxable_ordinary, FilingStatus status, double inf_factor)
+{
+    const auto& table = (status == FilingStatus::MarriedFilingJointly)
+                        ? kMfjOrdinary : kSingleOrdinary;
+    for (const auto& b : table)
+    {
+        double upper = std::isinf(b.upper) ? b.upper : b.upper * inf_factor;
+        if (taxable_ordinary <= upper)
+            return static_cast<int>(std::lround(b.rate * 100.0));
+    }
+    return 37;
+}
+
+int irmaa_tier_from_magi(double magi, FilingStatus status, int age, double inf_factor)
+{
+    if (age < 65)
+        return 0;
+    bool mfj = (status == FilingStatus::MarriedFilingJointly);
+    double t1 = (mfj ? 212000.0 : 106000.0) * inf_factor;
+    double t2 = (mfj ? 266000.0 : 133000.0) * inf_factor;
+    double t3 = (mfj ? 334000.0 : 167000.0) * inf_factor;
+    double t4 = (mfj ? 400000.0 : 200000.0) * inf_factor;
+    if (magi > t4) return 4;
+    if (magi > t3) return 3;
+    if (magi > t2) return 2;
+    if (magi > t1) return 1;
+    return 0;
+}
+
+std::pair<double, double> glide_path_return_vol(const PlanInput& input, int age) noexcept
+{
+    if (!input.enable_glide_path)
+        return { input.nominal_return, input.volatility };
+    double eq_pct = (age < input.retirement_age)
+                    ? input.equity_pct_pre_ret
+                    : input.equity_pct_in_ret;
+    double eq = std::clamp(eq_pct / 100.0, 0.0, 1.0);
+    double bd = 1.0 - eq;
+    double ret = eq * input.equity_return + bd * input.bond_return;
+    double var = eq * eq * input.equity_vol * input.equity_vol
+               + bd * bd * input.bond_vol * input.bond_vol
+               + 2.0 * 0.20 * eq * bd * input.equity_vol * input.bond_vol;
+    return { ret, std::sqrt(std::max(0.0, var)) };
+}
 
 TaxBreakdown compute_year_taxes(const PlanInput& input,
                                 FilingStatus year_status,
@@ -242,6 +289,8 @@ TaxBreakdown compute_year_taxes(const PlanInput& input,
     tb.state = compute_state_tax(input.state, ordinary_non_ss, ss_benefit, cap_gains,
                                  retirement_dist, year_status, age, inf_factor);
     tb.irmaa = compute_irmaa(agi, year_status, age, inf_factor);
+    tb.marginal_bracket_pct = marginal_ordinary_pct(taxable_ord, year_status, inf_factor);
+    tb.irmaa_tier = irmaa_tier_from_magi(agi, year_status, age, inf_factor);
     if (retired && input.enable_aca && aca_adults > 0)
     {
         FilingStatus aca_status = (aca_adults >= 2) ? FilingStatus::MarriedFilingJointly : FilingStatus::Single;
@@ -309,6 +358,7 @@ PlanResult simulate_with_returns(const PlanInput& input,
     double cum_taxes_real = 0.0;
     double min_spending_real = std::numeric_limits<double>::infinity();
     bool any_shortfall = false;
+    double guardrail_mult = 1.0;
 
     for (int i = 0; i < n_years; ++i)
     {
@@ -500,7 +550,27 @@ PlanResult simulate_with_returns(const PlanInput& input,
 
         const double tips = (retired && input.tips_floor_annual > 0.0)
                             ? input.tips_floor_annual * inf : 0.0;
-        const double target_net_spend = retired ? (annual_spending_real * spend_mult * inf) : 0.0;
+        const double debt_nom = (retired && p_alive && input.debt_annual_payment > 0.0 && age < input.debt_payoff_age)
+                            ? input.debt_annual_payment : 0.0;
+        const double ltc_nom = (retired && p_alive && input.ltc_years > 0
+                                && age >= input.ltc_start_age
+                                && age < input.ltc_start_age + input.ltc_years)
+                            ? (input.ltc_annual_cost_real * inf) : 0.0;
+
+        if (retired && input.enable_guardrails && annual_spending_real * spend_mult > 0.0)
+        {
+            double port_total = bal_tax + bal_def + bal_roth + bal_hsa;
+            double base_need = std::max(0.0, annual_spending_real * spend_mult * guardrail_mult * inf - (ss + pension + tips));
+            double cur_wr = (port_total > 1.0) ? (base_need / port_total) : 1.0;
+            if (cur_wr > input.guardrail_upper_wr && (input.horizon_age - age) > 5)
+                guardrail_mult = std::max(0.60, guardrail_mult * (1.0 - input.guardrail_adj_pct));
+            else if (cur_wr < input.guardrail_lower_wr)
+                guardrail_mult = std::min(1.50, guardrail_mult * (1.0 + input.guardrail_adj_pct));
+        }
+
+        const double target_net_spend = retired
+            ? (annual_spending_real * spend_mult * guardrail_mult * inf + debt_nom + ltc_nom)
+            : 0.0;
         yp.guaranteed_floor_nominal = ss + pension + tips;
         yp.floor_surplus_nominal = retired ? (yp.guaranteed_floor_nominal - target_net_spend) : 0.0;
 
@@ -652,6 +722,8 @@ PlanResult simulate_with_returns(const PlanInput& input,
         yp.irmaa_surcharge = tb.irmaa;
         yp.aca_premium = tb.aca;
         yp.total_tax = tb.total();
+        yp.marginal_bracket_pct = tb.marginal_bracket_pct;
+        yp.irmaa_tier = tb.irmaa_tier;
 
         yp.net_spending_nominal = net_spend;
         yp.net_spending_real = net_spend_real;
@@ -748,6 +820,11 @@ PlanResult simulate_plan(const PlanInput& input,
                       ? spouse_ss_claim_age : input.spouse_ss_claim_age;
     const int n_years = plan_num_years(input);
     std::vector<double> returns(static_cast<size_t>(n_years), input.nominal_return);
+    if (input.enable_glide_path)
+    {
+        for (int i = 0; i < n_years; ++i)
+            returns[static_cast<size_t>(i)] = glide_path_return_vol(input, input.current_age + i).first;
+    }
     return simulate_with_returns(input, strategy, ss_claim_age, sp_ss, annual_spending_real, returns);
 }
 
@@ -777,7 +854,18 @@ MonteCarloSummary run_monte_carlo(const PlanInput& input,
     for (int t = 0; t < mc.trials; ++t)
     {
         for (int y = 0; y < n_years; ++y)
-            returns[static_cast<size_t>(y)] = std::clamp(dist(rng), -0.60, 0.80);
+        {
+            if (input.enable_glide_path)
+            {
+                auto [gp_ret, gp_vol] = glide_path_return_vol(input, input.current_age + y);
+                std::normal_distribution<double> gp_dist(gp_ret, gp_vol);
+                returns[static_cast<size_t>(y)] = std::clamp(gp_dist(rng), -0.60, 0.80);
+            }
+            else
+            {
+                returns[static_cast<size_t>(y)] = std::clamp(dist(rng), -0.60, 0.80);
+            }
+        }
 
         PlanResult r = simulate_with_returns(
             input, strategy, ss_claim_age, sp_ss, annual_spending_real, returns);
@@ -914,6 +1002,102 @@ SensitivityMatrix run_sensitivity_matrix(
         }
     }
     return mat;
+}
+
+HistoricalSummary run_historical_backtests(
+    const PlanInput& input,
+    WithdrawalStrategy strategy,
+    int ss_claim_age,
+    double annual_spending_real,
+    int spouse_ss_claim_age)
+{
+    // Historical US S&P 500 & 10-Yr Treasury total returns (1928-2024, 97 years)
+    struct HistYear { int yr; double eq; double bd; };
+    static constexpr HistYear kHist[] = {
+        {1928,  0.438,  0.008}, {1929, -0.083,  0.042}, {1930, -0.251,  0.045}, {1931, -0.438, -0.026},
+        {1932, -0.086,  0.088}, {1933,  0.500,  0.019}, {1934, -0.012,  0.080}, {1935,  0.467,  0.045},
+        {1936,  0.319,  0.050}, {1937, -0.353,  0.014}, {1938,  0.293,  0.042}, {1939, -0.011,  0.044},
+        {1940, -0.107,  0.054}, {1941, -0.128, -0.020}, {1942,  0.192,  0.023}, {1943,  0.251,  0.025},
+        {1944,  0.190,  0.026}, {1945,  0.358,  0.038}, {1946, -0.084,  0.031}, {1947,  0.052,  0.009},
+        {1948,  0.057,  0.020}, {1949,  0.183,  0.047}, {1950,  0.308,  0.004}, {1951,  0.237, -0.003},
+        {1952,  0.182,  0.023}, {1953, -0.012,  0.041}, {1954,  0.526,  0.033}, {1955,  0.326, -0.013},
+        {1956,  0.074, -0.023}, {1957, -0.105,  0.068}, {1958,  0.437, -0.021}, {1959,  0.121, -0.026},
+        {1960,  0.003,  0.116}, {1961,  0.266,  0.021}, {1962, -0.088,  0.057}, {1963,  0.226,  0.017},
+        {1964,  0.164,  0.037}, {1965,  0.124,  0.007}, {1966, -0.100,  0.029}, {1967,  0.238, -0.016},
+        {1968,  0.108,  0.033}, {1969, -0.082, -0.050}, {1970,  0.036,  0.168}, {1971,  0.142,  0.098},
+        {1972,  0.188,  0.028}, {1973, -0.143,  0.037}, {1974, -0.259,  0.020}, {1975,  0.370,  0.036},
+        {1976,  0.238,  0.160}, {1977, -0.070,  0.013}, {1978,  0.065, -0.008}, {1979,  0.185,  0.007},
+        {1980,  0.317, -0.030}, {1981, -0.047,  0.082}, {1982,  0.204,  0.328}, {1983,  0.223,  0.032},
+        {1984,  0.061,  0.137}, {1985,  0.312,  0.257}, {1986,  0.185,  0.243}, {1987,  0.058, -0.050},
+        {1988,  0.165,  0.082}, {1989,  0.315,  0.177}, {1990, -0.031,  0.062}, {1991,  0.302,  0.150},
+        {1992,  0.075,  0.094}, {1993,  0.100,  0.142}, {1994,  0.013, -0.080}, {1995,  0.372,  0.235},
+        {1996,  0.227,  0.014}, {1997,  0.331,  0.099}, {1998,  0.283,  0.149}, {1999,  0.209, -0.083},
+        {2000, -0.090,  0.167}, {2001, -0.119,  0.056}, {2002, -0.220,  0.151}, {2003,  0.284,  0.004},
+        {2004,  0.107,  0.045}, {2005,  0.048,  0.029}, {2006,  0.156,  0.020}, {2007,  0.055,  0.102},
+        {2008, -0.366,  0.201}, {2009,  0.259, -0.111}, {2010,  0.148,  0.085}, {2011,  0.021,  0.160},
+        {2012,  0.159,  0.030}, {2013,  0.321, -0.091}, {2014,  0.135,  0.107}, {2015,  0.014,  0.013},
+        {2016,  0.118,  0.007}, {2017,  0.216,  0.028}, {2018, -0.042, -0.000}, {2019,  0.312,  0.096},
+        {2020,  0.180,  0.113}, {2021,  0.285, -0.044}, {2022, -0.180, -0.178}, {2023,  0.261,  0.039},
+        {2024,  0.249,  0.015}
+    };
+    static constexpr int kHistCount = static_cast<int>(sizeof(kHist) / sizeof(kHist[0]));
+    const int sp_ss = (spouse_ss_claim_age >= 62 && spouse_ss_claim_age <= 70)
+                      ? spouse_ss_claim_age : input.spouse_ss_claim_age;
+    const int n_years = plan_num_years(input);
+    const int ret_idx = std::clamp(input.retirement_age - input.current_age, 0, std::max(0, n_years - 1));
+
+    auto run_from_start = [&](const char* label, int start_idx) -> HistoricalBacktestResult {
+        std::vector<double> rets(static_cast<size_t>(n_years));
+        for (int i = 0; i < n_years; ++i)
+        {
+            double eq_wt = input.enable_glide_path
+                ? std::clamp(((input.current_age + i < input.retirement_age)
+                              ? input.equity_pct_pre_ret : input.equity_pct_in_ret) / 100.0, 0.0, 1.0)
+                : 0.60;
+            // Align retirement year to start_idx for crisis stress, or chronological from start_idx
+            int hidx = (start_idx + std::max(0, i - ret_idx)) % kHistCount;
+            if (i < ret_idx)
+                hidx = (start_idx + i) % kHistCount;
+            rets[static_cast<size_t>(i)] = eq_wt * kHist[hidx].eq + (1.0 - eq_wt) * kHist[hidx].bd;
+        }
+        PlanResult r = simulate_with_returns(input, strategy, ss_claim_age, sp_ss, annual_spending_real, rets);
+        HistoricalBacktestResult hr;
+        hr.name = label;
+        hr.start_year = kHist[start_idx % kHistCount].yr;
+        hr.feasible = r.plan_feasible;
+        hr.min_spending_real = r.sustainable_spending_real;
+        hr.final_bequest_real = r.final_bequest_real;
+        for (const auto& yp : r.schedule)
+            if (yp.shortfall) ++hr.shortfall_years;
+        return hr;
+    };
+
+    HistoricalSummary out;
+    int successes = 0;
+    HistoricalBacktestResult worst;
+    worst.final_bequest_real = std::numeric_limits<double>::infinity();
+    for (int s = 0; s < kHistCount; ++s)
+    {
+        auto hr = run_from_start("Rolling", s);
+        ++out.total_cycles;
+        if (hr.feasible) ++successes;
+        if (hr.final_bequest_real < worst.final_bequest_real)
+        {
+            worst = hr;
+            worst.name = "Worst Historical Cycle (" + std::to_string(hr.start_year) + ")";
+        }
+    }
+    out.rolling_success_rate = (out.total_cycles > 0)
+        ? (static_cast<double>(successes) / static_cast<double>(out.total_cycles))
+        : 0.0;
+
+    out.scenarios.push_back(run_from_start("1929 Great Depression", 1));
+    out.scenarios.push_back(run_from_start("1966 Stagflation Era", 38));
+    out.scenarios.push_back(run_from_start("1973 Oil Shock", 45));
+    out.scenarios.push_back(run_from_start("2000 Dot-Com Crash", 72));
+    out.scenarios.push_back(run_from_start("2008 Global Financial Crisis", 80));
+    out.scenarios.push_back(std::move(worst));
+    return out;
 }
 
 PlanResult optimize_plan(const PlanInput& input)
@@ -1332,6 +1516,22 @@ std::string serialize_plan_ini(
     oss << "no_go_pct=" << input.no_go_pct << "\n";
     oss << "reinvest_rmd_surplus=" << (input.reinvest_rmd_surplus ? "true" : "false") << "\n";
     oss << "tips_floor_annual=" << input.tips_floor_annual << "\n";
+    oss << "enable_guardrails=" << (input.enable_guardrails ? "true" : "false") << "\n";
+    oss << "guardrail_upper_wr=" << input.guardrail_upper_wr << "\n";
+    oss << "guardrail_lower_wr=" << input.guardrail_lower_wr << "\n";
+    oss << "guardrail_adj_pct=" << input.guardrail_adj_pct << "\n";
+    oss << "debt_annual_payment=" << input.debt_annual_payment << "\n";
+    oss << "debt_payoff_age=" << input.debt_payoff_age << "\n";
+    oss << "ltc_start_age=" << input.ltc_start_age << "\n";
+    oss << "ltc_years=" << input.ltc_years << "\n";
+    oss << "ltc_annual_cost_real=" << input.ltc_annual_cost_real << "\n";
+    oss << "enable_glide_path=" << (input.enable_glide_path ? "true" : "false") << "\n";
+    oss << "equity_pct_pre_ret=" << input.equity_pct_pre_ret << "\n";
+    oss << "equity_pct_in_ret=" << input.equity_pct_in_ret << "\n";
+    oss << "equity_return=" << input.equity_return << "\n";
+    oss << "bond_return=" << input.bond_return << "\n";
+    oss << "equity_vol=" << input.equity_vol << "\n";
+    oss << "bond_vol=" << input.bond_vol << "\n";
 
     if (!input.events.empty())
     {
@@ -1497,6 +1697,22 @@ bool deserialize_plan_ini(
                 else if (lkey == "no_go_pct") { in.no_go_pct = std::clamp(std::stod(val), 10.0, 200.0); saw_plan_key = true; }
                 else if (lkey == "reinvest_rmd_surplus") { in.reinvest_rmd_surplus = parse_bool(val, in.reinvest_rmd_surplus); saw_plan_key = true; }
                 else if (lkey == "tips_floor_annual") { in.tips_floor_annual = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "enable_guardrails") { in.enable_guardrails = parse_bool(val, in.enable_guardrails); saw_plan_key = true; }
+                else if (lkey == "guardrail_upper_wr") { in.guardrail_upper_wr = std::clamp(std::stod(val), 0.02, 0.20); saw_plan_key = true; }
+                else if (lkey == "guardrail_lower_wr") { in.guardrail_lower_wr = std::clamp(std::stod(val), 0.01, 0.15); saw_plan_key = true; }
+                else if (lkey == "guardrail_adj_pct") { in.guardrail_adj_pct = std::clamp(std::stod(val), 0.01, 0.50); saw_plan_key = true; }
+                else if (lkey == "debt_annual_payment") { in.debt_annual_payment = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "debt_payoff_age") { in.debt_payoff_age = std::clamp(std::stoi(val), 30, 110); saw_plan_key = true; }
+                else if (lkey == "ltc_start_age") { in.ltc_start_age = std::clamp(std::stoi(val), 50, 110); saw_plan_key = true; }
+                else if (lkey == "ltc_years") { in.ltc_years = std::clamp(std::stoi(val), 0, 20); saw_plan_key = true; }
+                else if (lkey == "ltc_annual_cost_real") { in.ltc_annual_cost_real = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "enable_glide_path") { in.enable_glide_path = parse_bool(val, in.enable_glide_path); saw_plan_key = true; }
+                else if (lkey == "equity_pct_pre_ret") { in.equity_pct_pre_ret = std::clamp(std::stod(val), 0.0, 100.0); saw_plan_key = true; }
+                else if (lkey == "equity_pct_in_ret") { in.equity_pct_in_ret = std::clamp(std::stod(val), 0.0, 100.0); saw_plan_key = true; }
+                else if (lkey == "equity_return") { in.equity_return = std::clamp(std::stod(val), 0.0, 0.25); saw_plan_key = true; }
+                else if (lkey == "bond_return") { in.bond_return = std::clamp(std::stod(val), 0.0, 0.20); saw_plan_key = true; }
+                else if (lkey == "equity_vol") { in.equity_vol = std::clamp(std::stod(val), 0.0, 0.50); saw_plan_key = true; }
+                else if (lkey == "bond_vol") { in.bond_vol = std::clamp(std::stod(val), 0.0, 0.30); saw_plan_key = true; }
             }
             catch (...)
             {
@@ -1531,7 +1747,7 @@ std::string export_schedule_csv(const PlanInput& input,
            "Contributions,SSIncome,PensionIncome,RMD,RothConversion,"
            "WithdrawTaxable,WithdrawTaxDeferred,WithdrawRoth,WithdrawHSA,"
            "OrdinaryTax,LTCGTax,NIIT,StateTax,IRMAA,ACAPremium,TotalTax,"
-           "NetSpending,Shortfall,LumpSumNet,RMDReinvested,GuaranteedFloor,FloorSurplusDeficit\n";
+           "NetSpending,Shortfall,LumpSumNet,RMDReinvested,GuaranteedFloor,FloorSurplusDeficit,MarginalBracketPct,IRMAATier\n";
 
     for (size_t i = 0; i < result.schedule.size(); ++i)
     {
@@ -1569,7 +1785,9 @@ std::string export_schedule_csv(const PlanInput& input,
             << (yp.lump_sum_net / div) << ","
             << (yp.rmd_reinvested / div) << ","
             << (yp.guaranteed_floor_nominal / div) << ","
-            << (yp.floor_surplus_nominal / div) << "\n";
+            << (yp.floor_surplus_nominal / div) << ","
+            << yp.marginal_bracket_pct << ","
+            << yp.irmaa_tier << "\n";
     }
     return oss.str();
 }
