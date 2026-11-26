@@ -2497,9 +2497,13 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     GtkWidget* outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_container_set_border_width(GTK_CONTAINER(outer), 8);
 
-    // Top display options & actions bar (compact, never overflows)
-    GtkWidget* top_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_pack_start(GTK_BOX(outer), top_bar, FALSE, FALSE, 0);
+    // Top display options & actions bar (compact, horizontally scrollable if narrow)
+    GtkWidget* top_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(top_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+    GtkWidget* top_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_container_add(GTK_CONTAINER(top_scroll), top_bar);
+    gtk_box_pack_start(GTK_BOX(outer), top_scroll, FALSE, FALSE, 0);
 
     priv->btn_toggle_params = GTK_TOGGLE_BUTTON(gtk_toggle_button_new_with_label(_("Planner Options")));
     gtk_toggle_button_set_active(priv->btn_toggle_params, TRUE);
@@ -2533,14 +2537,6 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_refresh_accounts_clicked), priv);
     gtk_box_pack_end(GTK_BOX(top_bar), btn_refresh, FALSE, FALSE, 0);
 
-    GtkWidget* btn_export_csv = gtk_button_new_with_label(_("Export CSV..."));
-    g_signal_connect(btn_export_csv, "clicked", G_CALLBACK(on_export_csv_clicked), priv);
-    gtk_box_pack_end(GTK_BOX(top_bar), btn_export_csv, FALSE, FALSE, 0);
-
-    GtkWidget* btn_export_html = gtk_button_new_with_label(_("Report (HTML)..."));
-    g_signal_connect(btn_export_html, "clicked", G_CALLBACK(on_export_html_clicked), priv);
-    gtk_box_pack_end(GTK_BOX(top_bar), btn_export_html, FALSE, FALSE, 0);
-
     GtkWidget* btn_help = gtk_button_new_with_label(_("Help (F1)"));
     g_signal_connect(btn_help, "clicked", G_CALLBACK(on_retirement_help_clicked), priv);
     gtk_box_pack_end(GTK_BOX(top_bar), btn_help, FALSE, FALSE, 0);
@@ -2548,13 +2544,21 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     GtkWidget* plan_menu = gtk_menu_new();
     GtkWidget* mi_save = gtk_menu_item_new_with_label(_("Save Plan As..."));
     GtkWidget* mi_load = gtk_menu_item_new_with_label(_("Load Plan..."));
+    GtkWidget* mi_sep1 = gtk_separator_menu_item_new();
+    GtkWidget* mi_exp_csv = gtk_menu_item_new_with_label(_("Export CSV..."));
+    GtkWidget* mi_exp_html = gtk_menu_item_new_with_label(_("Export HTML Report..."));
     GtkWidget* mi_sep = gtk_separator_menu_item_new();
     GtkWidget* mi_reset = gtk_menu_item_new_with_label(_("Reset to Defaults"));
     g_signal_connect(mi_save, "activate", G_CALLBACK(on_save_plan_clicked), priv);
     g_signal_connect(mi_load, "activate", G_CALLBACK(on_load_plan_clicked), priv);
+    g_signal_connect(mi_exp_csv, "activate", G_CALLBACK(on_export_csv_clicked), priv);
+    g_signal_connect(mi_exp_html, "activate", G_CALLBACK(on_export_html_clicked), priv);
     g_signal_connect(mi_reset, "activate", G_CALLBACK(on_reset_defaults_clicked), priv);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_save);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_load);
+    gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_sep1);
+    gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_exp_csv);
+    gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_exp_html);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_sep);
     gtk_menu_shell_append(GTK_MENU_SHELL(plan_menu), mi_reset);
     gtk_widget_show_all(plan_menu);
@@ -2576,6 +2580,7 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
 
     // Left panel: Tabbed parameter groups so everything is compact & reachable
     GtkWidget* left_nb = gtk_notebook_new();
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(left_nb), TRUE);
     gtk_widget_set_size_request(left_nb, 260, 200);
     priv->left_panel = left_nb;
 
@@ -2769,13 +2774,18 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
         gtk_box_pack_start(GTK_BOX(ev_btns), btn_rem_ev, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(ph_box), ev_btns, FALSE, FALSE, 0);
 
-        gtk_notebook_append_page(GTK_NOTEBOOK(left_nb), ph_box, gtk_label_new(_("Phases/Events")));
+        GtkWidget* ph_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ph_scroll),
+                                       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        gtk_container_add(GTK_CONTAINER(ph_scroll), ph_box);
+        gtk_notebook_append_page(GTK_NOTEBOOK(left_nb), ph_scroll, gtk_label_new(_("Phases/Events")));
     }
 
     gtk_paned_pack1(GTK_PANED(paned), left_nb, FALSE, TRUE);
 
     // Right panel: Notebook with Overview/Chart, Schedule, Baseline vs Owl, Account Mapping
     GtkWidget* nb = gtk_notebook_new();
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(nb), TRUE);
     gtk_paned_pack2(GTK_PANED(paned), nb, TRUE, TRUE);
 
     // Tab 1: Overview & Chart
@@ -3064,7 +3074,11 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_container_add(GTK_CONTAINER(hist_scroll), hist_tv);
     gtk_box_pack_start(GTK_BOX(tab_stress), hist_scroll, FALSE, TRUE, 0);
 
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_stress, gtk_label_new(_("Stress & Sensitivity")));
+    GtkWidget* stress_tab_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(stress_tab_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(stress_tab_scroll), tab_stress);
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), stress_tab_scroll, gtk_label_new(_("Stress & Sensitivity")));
 
     // Tab 6: Social Security Break-Even Analysis
     priv->ss_be_store = gtk_list_store_new(11,
