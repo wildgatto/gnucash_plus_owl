@@ -164,6 +164,20 @@ struct GncPluginPageRetirementPrivate
     GtkCheckButton* chk_aca_cliff = nullptr;
     GtkSpinButton* spin_mc_trials = nullptr;
 
+    // Spouse / Partner controls
+    GtkCheckButton* chk_has_spouse = nullptr;
+    GtkSpinButton* spin_sp_cur_age = nullptr;
+    GtkSpinButton* spin_sp_ret_age = nullptr;
+    GtkSpinButton* spin_sp_hor_age = nullptr;
+    GtkSpinButton* spin_sp_ss_fra = nullptr;
+    GtkSpinButton* spin_sp_ss_age = nullptr;
+    GtkCheckButton* chk_sp_opt_ss = nullptr;
+    GtkSpinButton* spin_sp_pension = nullptr;
+    GtkSpinButton* spin_sp_pension_age = nullptr;
+    GtkSpinButton* spin_sp_rmd_age = nullptr;
+    GtkSpinButton* spin_sp_contrib_def = nullptr;
+    GtkSpinButton* spin_sp_contrib_roth = nullptr;
+
     // Bucket summary label
     GtkLabel* lbl_bucket_summary = nullptr;
 
@@ -401,6 +415,13 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
                 std::to_string(priv->last_input.ss_claim_age),
                 std::to_string(res.chosen_ss_age),
                 std::to_string(res.chosen_ss_age - priv->last_input.ss_claim_age) + " yrs");
+    if (priv->last_input.has_spouse)
+    {
+        add_cmp_row(_("Spouse SS Claim Age"),
+                    std::to_string(priv->last_input.spouse_ss_claim_age),
+                    std::to_string(res.chosen_spouse_ss_age),
+                    std::to_string(res.chosen_spouse_ss_age - priv->last_input.spouse_ss_claim_age) + " yrs");
+    }
     add_cmp_row(_("Sustainable Spending / yr (Today $)"),
                 fmt_currency(res.baseline_spending_real),
                 fmt_currency(res.sustainable_spending_real),
@@ -462,7 +483,36 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.aca_benchmark_premium = gtk_spin_button_get_value(priv->spin_aca_bench);
     in.aca_enforce_400_cliff = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff));
     in.monte_carlo_trials = gtk_spin_button_get_value_as_int(priv->spin_mc_trials);
+
+    in.has_spouse = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse));
+    in.spouse_current_age = gtk_spin_button_get_value_as_int(priv->spin_sp_cur_age);
+    in.spouse_retirement_age = std::max(in.spouse_current_age, gtk_spin_button_get_value_as_int(priv->spin_sp_ret_age));
+    in.spouse_horizon_age = std::max(in.spouse_retirement_age + 1, gtk_spin_button_get_value_as_int(priv->spin_sp_hor_age));
+    in.spouse_ss_fra_annual = gtk_spin_button_get_value(priv->spin_sp_ss_fra);
+    in.spouse_ss_claim_age = gtk_spin_button_get_value_as_int(priv->spin_sp_ss_age);
+    in.spouse_optimize_ss_age = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_sp_opt_ss));
+    in.spouse_pension_annual = gtk_spin_button_get_value(priv->spin_sp_pension);
+    in.spouse_pension_start_age = gtk_spin_button_get_value_as_int(priv->spin_sp_pension_age);
+    in.spouse_rmd_start_age = gtk_spin_button_get_value_as_int(priv->spin_sp_rmd_age);
+    in.spouse_contrib_tax_deferred = gtk_spin_button_get_value(priv->spin_sp_contrib_def);
+    in.spouse_contrib_tax_free = gtk_spin_button_get_value(priv->spin_sp_contrib_roth);
     return in;
+}
+
+static void
+update_spouse_sensitivity(GncPluginPageRetirementPrivate* priv)
+{
+    const gboolean en = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse));
+    GtkWidget* widgets[] = {
+        GTK_WIDGET(priv->spin_sp_cur_age), GTK_WIDGET(priv->spin_sp_ret_age),
+        GTK_WIDGET(priv->spin_sp_hor_age), GTK_WIDGET(priv->spin_sp_ss_fra),
+        GTK_WIDGET(priv->spin_sp_ss_age), GTK_WIDGET(priv->chk_sp_opt_ss),
+        GTK_WIDGET(priv->spin_sp_pension), GTK_WIDGET(priv->spin_sp_pension_age),
+        GTK_WIDGET(priv->spin_sp_rmd_age), GTK_WIDGET(priv->spin_sp_contrib_def),
+        GTK_WIDGET(priv->spin_sp_contrib_roth)
+    };
+    for (GtkWidget* w : widgets)
+        if (w) gtk_widget_set_sensitive(w, en);
 }
 
 static void
@@ -501,6 +551,20 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_spin_button_set_value(priv->spin_aca_bench, in.aca_benchmark_premium);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_aca_cliff), in.aca_enforce_400_cliff);
     gtk_spin_button_set_value(priv->spin_mc_trials, in.monte_carlo_trials);
+
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse), in.has_spouse);
+    gtk_spin_button_set_value(priv->spin_sp_cur_age, in.spouse_current_age);
+    gtk_spin_button_set_value(priv->spin_sp_ret_age, in.spouse_retirement_age);
+    gtk_spin_button_set_value(priv->spin_sp_hor_age, in.spouse_horizon_age);
+    gtk_spin_button_set_value(priv->spin_sp_ss_fra, in.spouse_ss_fra_annual);
+    gtk_spin_button_set_value(priv->spin_sp_ss_age, in.spouse_ss_claim_age);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_sp_opt_ss), in.spouse_optimize_ss_age);
+    gtk_spin_button_set_value(priv->spin_sp_pension, in.spouse_pension_annual);
+    gtk_spin_button_set_value(priv->spin_sp_pension_age, in.spouse_pension_start_age);
+    gtk_spin_button_set_value(priv->spin_sp_rmd_age, in.spouse_rmd_start_age);
+    gtk_spin_button_set_value(priv->spin_sp_contrib_def, in.spouse_contrib_tax_deferred);
+    gtk_spin_button_set_value(priv->spin_sp_contrib_roth, in.spouse_contrib_tax_free);
+    update_spouse_sensitivity(priv);
 }
 
 static std::vector<std::pair<std::string, TaxBucket>>
@@ -589,6 +653,18 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv)
     g_key_file_set_double(state, STATE_GROUP_PLAN, "aca_benchmark_premium", in.aca_benchmark_premium);
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "aca_enforce_400_cliff", in.aca_enforce_400_cliff);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "monte_carlo_trials", in.monte_carlo_trials);
+    g_key_file_set_boolean(state, STATE_GROUP_PLAN, "has_spouse", in.has_spouse);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_current_age", in.spouse_current_age);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_retirement_age", in.spouse_retirement_age);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_horizon_age", in.spouse_horizon_age);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_ss_fra_annual", in.spouse_ss_fra_annual);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_ss_claim_age", in.spouse_ss_claim_age);
+    g_key_file_set_boolean(state, STATE_GROUP_PLAN, "spouse_optimize_ss_age", in.spouse_optimize_ss_age);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_pension_annual", in.spouse_pension_annual);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_pension_start_age", in.spouse_pension_start_age);
+    g_key_file_set_integer(state, STATE_GROUP_PLAN, "spouse_rmd_start_age", in.spouse_rmd_start_age);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_contrib_tax_deferred", in.spouse_contrib_tax_deferred);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "spouse_contrib_tax_free", in.spouse_contrib_tax_free);
 
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "chart_mode",
                            gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_chart_mode)));
@@ -662,6 +738,18 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.aca_benchmark_premium = std::max(0.0, get_dbl("aca_benchmark_premium", in.aca_benchmark_premium));
     in.aca_enforce_400_cliff = get_bool("aca_enforce_400_cliff", in.aca_enforce_400_cliff);
     in.monte_carlo_trials = std::clamp(get_int("monte_carlo_trials", in.monte_carlo_trials), 50, 1000);
+    in.has_spouse = get_bool("has_spouse", in.has_spouse);
+    in.spouse_current_age = std::clamp(get_int("spouse_current_age", in.spouse_current_age), 18, 95);
+    in.spouse_retirement_age = std::clamp(get_int("spouse_retirement_age", in.spouse_retirement_age), 30, 95);
+    in.spouse_horizon_age = std::clamp(get_int("spouse_horizon_age", in.spouse_horizon_age), 65, 110);
+    in.spouse_ss_fra_annual = std::max(0.0, get_dbl("spouse_ss_fra_annual", in.spouse_ss_fra_annual));
+    in.spouse_ss_claim_age = std::clamp(get_int("spouse_ss_claim_age", in.spouse_ss_claim_age), 62, 70);
+    in.spouse_optimize_ss_age = get_bool("spouse_optimize_ss_age", in.spouse_optimize_ss_age);
+    in.spouse_pension_annual = std::max(0.0, get_dbl("spouse_pension_annual", in.spouse_pension_annual));
+    in.spouse_pension_start_age = std::clamp(get_int("spouse_pension_start_age", in.spouse_pension_start_age), 50, 85);
+    in.spouse_rmd_start_age = std::clamp(get_int("spouse_rmd_start_age", in.spouse_rmd_start_age), 72, 75);
+    in.spouse_contrib_tax_deferred = std::max(0.0, get_dbl("spouse_contrib_tax_deferred", in.spouse_contrib_tax_deferred));
+    in.spouse_contrib_tax_free = std::max(0.0, get_dbl("spouse_contrib_tax_free", in.spouse_contrib_tax_free));
 
     apply_plan_input_to_ui(priv, in);
 
@@ -723,9 +811,17 @@ run_planner(GncPluginPageRetirementPrivate* priv)
                   fmt_currency(res.monte_carlo.p50_end_real).c_str());
     gtk_label_set_text(priv->lbl_kpi_mc_val, mc_buf);
 
-    char rec_buf[160];
-    std::snprintf(rec_buf, sizeof(rec_buf), "Recommended: %s  |  SS Claim Age %d",
-                  strategy_label(res.chosen_strategy), res.chosen_ss_age);
+    char rec_buf[200];
+    if (in.has_spouse)
+    {
+        std::snprintf(rec_buf, sizeof(rec_buf), "Recommended: %s  |  SS Claim Ages: %d & %d (Spouse)",
+                      strategy_label(res.chosen_strategy), res.chosen_ss_age, res.chosen_spouse_ss_age);
+    }
+    else
+    {
+        std::snprintf(rec_buf, sizeof(rec_buf), "Recommended: %s  |  SS Claim Age %d",
+                      strategy_label(res.chosen_strategy), res.chosen_ss_age);
+    }
     gtk_label_set_text(priv->lbl_kpi_rec_val, rec_buf);
 
     populate_schedule_and_comparison(priv);
@@ -1460,6 +1556,33 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(g_mkt, GTK_WIDGET(priv->chk_aca_cliff), 0, r3++, 2, 1);
 
     priv->spin_mc_trials = add_spin_row(g_mkt, r3, _("Monte Carlo Trials"), 50, 1000, 50, 300);
+
+    // Sub-tab 4: Spouse / Partner
+    GtkGrid* g_sp = nullptr;
+    make_param_tab(_("Spouse"), &g_sp);
+    int r4 = 0;
+    priv->chk_has_spouse = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Include Spouse / Partner")));
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_has_spouse), FALSE);
+    g_signal_connect(priv->chk_has_spouse, "toggled",
+                     G_CALLBACK(+[](GtkToggleButton*, gpointer ud) {
+                         update_spouse_sensitivity(static_cast<GncPluginPageRetirementPrivate*>(ud));
+                     }), priv);
+    gtk_grid_attach(g_sp, GTK_WIDGET(priv->chk_has_spouse), 0, r4++, 2, 1);
+
+    priv->spin_sp_cur_age = add_spin_row(g_sp, r4, _("Spouse Age"), 18, 95, 1, 53);
+    priv->spin_sp_ret_age = add_spin_row(g_sp, r4, _("Spouse Retire Age"), 30, 95, 1, 65);
+    priv->spin_sp_hor_age = add_spin_row(g_sp, r4, _("Spouse Horizon Age"), 65, 110, 1, 95);
+    priv->spin_sp_ss_fra = add_spin_row(g_sp, r4, _("Spouse SS FRA ($/yr)"), 0, 120000, 500, 22000);
+    priv->spin_sp_ss_age = add_spin_row(g_sp, r4, _("Spouse SS Claim Age"), 62, 70, 1, 67);
+    priv->chk_sp_opt_ss = GTK_CHECK_BUTTON(gtk_check_button_new_with_label(_("Auto-optimize Spouse SS (62-70)")));
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->chk_sp_opt_ss), TRUE);
+    gtk_grid_attach(g_sp, GTK_WIDGET(priv->chk_sp_opt_ss), 0, r4++, 2, 1);
+    priv->spin_sp_pension = add_spin_row(g_sp, r4, _("Spouse Pension ($/yr)"), 0, 500000, 500, 0);
+    priv->spin_sp_pension_age = add_spin_row(g_sp, r4, _("Spouse Pension Age"), 50, 85, 1, 65);
+    priv->spin_sp_rmd_age = add_spin_row(g_sp, r4, _("Spouse RMD Age"), 72, 75, 1, 73);
+    priv->spin_sp_contrib_def = add_spin_row(g_sp, r4, _("Spouse 401k Contrib"), 0, 100000, 500, 0);
+    priv->spin_sp_contrib_roth = add_spin_row(g_sp, r4, _("Spouse Roth Contrib"), 0, 100000, 500, 0);
+    update_spouse_sensitivity(priv);
 
     gtk_paned_pack1(GTK_PANED(paned), left_nb, FALSE, TRUE);
 

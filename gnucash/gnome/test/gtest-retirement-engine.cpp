@@ -276,3 +276,50 @@ TEST(RetirementEngine, ExportScheduleCsv)
         if (c == '\n') ++lines;
     EXPECT_EQ(lines, 1 + res.schedule.size());
 }
+
+TEST(RetirementEngine, SpouseTwoPersonHouseholdAndSurvivorBenefit)
+{
+    PlanInput single_in;
+    single_in.current_age = 62;
+    single_in.retirement_age = 65;
+    single_in.horizon_age = 90;
+    single_in.filing_status = FilingStatus::MarriedFilingJointly;
+    single_in.initial_balances.taxable = 300000.0;
+    single_in.initial_balances.tax_deferred = 700000.0;
+    single_in.ss_fra_annual = 34000.0;
+    single_in.optimize_ss_age = false;
+    single_in.strategy = WithdrawalStrategy::StandardTaxableFirst;
+    single_in.monte_carlo_trials = 20;
+
+    PlanResult r_one = optimize_plan(single_in);
+
+    PlanInput couple_in = single_in;
+    couple_in.has_spouse = true;
+    couple_in.spouse_current_age = 60;
+    couple_in.spouse_retirement_age = 65;
+    couple_in.spouse_horizon_age = 94; // Spouse outlives primary by 6 years (age 88..94)
+    couple_in.spouse_ss_fra_annual = 24000.0;
+    couple_in.spouse_optimize_ss_age = true;
+    couple_in.spouse_pension_annual = 10000.0;
+    couple_in.spouse_pension_start_age = 65;
+
+    PlanResult r_two = optimize_plan(couple_in);
+    EXPECT_TRUE(r_two.plan_feasible);
+    // Horizon extends to spouse's horizon (94 - 60 + 1 = 35 years)
+    EXPECT_EQ(r_two.schedule.size(), 35u);
+    EXPECT_GE(r_two.chosen_spouse_ss_age, 62);
+    EXPECT_LE(r_two.chosen_spouse_ss_age, 70);
+    // Spouse's SS + pension increases sustainable spending vs 1-earner
+    EXPECT_GT(r_two.sustainable_spending_real, r_one.sustainable_spending_real);
+
+    // Round-trip serialization of spouse fields
+    std::string ini = serialize_plan_ini(couple_in);
+    PlanInput roundtrip;
+    std::vector<std::pair<std::string, TaxBucket>> ov;
+    ASSERT_TRUE(deserialize_plan_ini(ini, roundtrip, ov));
+    EXPECT_TRUE(roundtrip.has_spouse);
+    EXPECT_EQ(roundtrip.spouse_current_age, 60);
+    EXPECT_EQ(roundtrip.spouse_horizon_age, 94);
+    EXPECT_DOUBLE_EQ(roundtrip.spouse_ss_fra_annual, 24000.0);
+    EXPECT_DOUBLE_EQ(roundtrip.spouse_pension_annual, 10000.0);
+}

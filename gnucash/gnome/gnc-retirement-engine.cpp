@@ -222,27 +222,30 @@ struct TaxBreakdown
 };
 
 TaxBreakdown compute_year_taxes(const PlanInput& input,
+                                FilingStatus year_status,
                                 double ordinary_non_ss, double ss_benefit,
                                 double cap_gains, double retirement_dist,
-                                bool retired, int age, double inf_factor)
+                                bool retired, int age, int aca_adults,
+                                double inf_factor)
 {
-    double ss_taxable = taxable_ss_portion(ss_benefit, ordinary_non_ss, cap_gains, input.filing_status);
+    double ss_taxable = taxable_ss_portion(ss_benefit, ordinary_non_ss, cap_gains, year_status);
     double agi = ordinary_non_ss + ss_taxable + cap_gains;
-    double ded = standard_deduction(input.filing_status, age, inf_factor);
+    double ded = standard_deduction(year_status, age, inf_factor);
     double taxable_ord = std::max(0.0, ordinary_non_ss + ss_taxable - ded);
     double leftover_ded = std::max(0.0, ded - (ordinary_non_ss + ss_taxable));
     double taxable_cg = std::max(0.0, cap_gains - leftover_ded);
 
     TaxBreakdown tb;
-    tb.ordinary = compute_ordinary_tax(taxable_ord, input.filing_status, inf_factor);
-    tb.ltcg = compute_ltcg_tax(taxable_ord, taxable_cg, input.filing_status, inf_factor);
-    tb.niit = compute_niit(agi, cap_gains, input.filing_status, inf_factor);
+    tb.ordinary = compute_ordinary_tax(taxable_ord, year_status, inf_factor);
+    tb.ltcg = compute_ltcg_tax(taxable_ord, taxable_cg, year_status, inf_factor);
+    tb.niit = compute_niit(agi, cap_gains, year_status, inf_factor);
     tb.state = compute_state_tax(input.state, ordinary_non_ss, ss_benefit, cap_gains,
-                                 retirement_dist, input.filing_status, age, inf_factor);
-    tb.irmaa = compute_irmaa(agi, input.filing_status, age, inf_factor);
-    if (retired && input.enable_aca && age < 65)
+                                 retirement_dist, year_status, age, inf_factor);
+    tb.irmaa = compute_irmaa(agi, year_status, age, inf_factor);
+    if (retired && input.enable_aca && aca_adults > 0)
     {
-        tb.aca = compute_aca_premium(agi, input.filing_status, age,
+        FilingStatus aca_status = (aca_adults >= 2) ? FilingStatus::MarriedFilingJointly : FilingStatus::Single;
+        tb.aca = compute_aca_premium(agi, aca_status, 60,
                                      input.aca_benchmark_premium,
                                      input.aca_enforce_400_cliff, inf_factor);
     }
@@ -260,17 +263,27 @@ double roth_conversion_target_rate(WithdrawalStrategy s) noexcept
     }
 }
 
+int plan_num_years(const PlanInput& input) noexcept
+{
+    int yrs = input.horizon_age - input.current_age + 1;
+    if (input.has_spouse)
+        yrs = std::max(yrs, input.spouse_horizon_age - input.spouse_current_age + 1);
+    return std::max(1, yrs);
+}
+
 PlanResult simulate_with_returns(const PlanInput& input,
                                  WithdrawalStrategy strategy,
                                  int ss_claim_age,
+                                 int spouse_ss_claim_age,
                                  double annual_spending_real,
                                  const std::vector<double>& annual_returns)
 {
     PlanResult res;
     res.chosen_strategy = strategy;
     res.chosen_ss_age = ss_claim_age;
+    res.chosen_spouse_ss_age = spouse_ss_claim_age;
 
-    const int n_years = std::max(1, input.horizon_age - input.current_age + 1);
+    const int n_years = plan_num_years(input);
     res.schedule.reserve(static_cast<size_t>(n_years));
 
     double bal_tax = std::max(0.0, input.initial_balances.taxable);
@@ -286,12 +299,21 @@ PlanResult simulate_with_returns(const PlanInput& input,
     for (int i = 0; i < n_years; ++i)
     {
         const int age = input.current_age + i;
+        const int sp_age = input.spouse_current_age + i;
+        const bool p_alive = (age <= input.horizon_age);
+        const bool s_alive = input.has_spouse && (sp_age <= input.spouse_horizon_age);
         const int year = input.start_year + i;
         const double inf = std::pow(1.0 + input.inflation, i);
-        const bool retired = (age >= input.retirement_age);
+        const bool retired = (!p_alive || age >= input.retirement_age);
         const double ret = (i < static_cast<int>(annual_returns.size()))
                            ? annual_returns[static_cast<size_t>(i)]
                            : input.nominal_return;
+
+        const FilingStatus year_status = (p_alive && s_alive)
+            ? input.filing_status
+            : (input.has_spouse ? FilingStatus::Single : input.filing_status);
+        const int tax_age = std::max(p_alive ? age : 0, s_alive ? sp_age : 0);
+        const int aca_adults = (p_alive && age < 65 ? 1 : 0) + (s_alive && sp_age < 65 ? 1 : 0);
 
         YearProjection yp;
         yp.year = year;
@@ -299,7 +321,8 @@ PlanResult simulate_with_returns(const PlanInput& input,
         yp.is_retired = retired;
 
         // 1. Pre-retirement contributions
-        if (!retired)
+        double c_total = 0.0;
+        if (p_alive && age < input.retirement_age)
         {
             double c_tax = input.contrib_taxable * inf;
             double c_def = input.contrib_tax_deferred * inf;
@@ -310,28 +333,68 @@ PlanResult simulate_with_returns(const PlanInput& input,
             bal_def += c_def;
             bal_roth += c_roth;
             bal_hsa += c_hsa;
-            yp.contributions = c_tax + c_def + c_roth + c_hsa;
+            c_total += c_tax + c_def + c_roth + c_hsa;
         }
+        if (s_alive && sp_age < input.spouse_retirement_age)
+        {
+            double sc_def = input.spouse_contrib_tax_deferred * inf;
+            double sc_roth = input.spouse_contrib_tax_free * inf;
+            bal_def += sc_def;
+            bal_roth += sc_roth;
+            c_total += sc_def + sc_roth;
+        }
+        yp.contributions = c_total;
 
-        // 2. Fixed income: Social Security & Pension
-        double ss = (age >= ss_claim_age)
-                    ? adjusted_social_security(input.ss_fra_annual, ss_claim_age) * inf
-                    : 0.0;
+        // 2. Fixed income: Social Security (with survivor benefit) & Pension(s)
+        const double p_ss_full = (age >= ss_claim_age)
+            ? adjusted_social_security(input.ss_fra_annual, ss_claim_age) * inf : 0.0;
+        const double s_ss_full = (input.has_spouse && sp_age >= spouse_ss_claim_age)
+            ? adjusted_social_security(input.spouse_ss_fra_annual, spouse_ss_claim_age) * inf : 0.0;
+        double ss = 0.0;
+        if (p_alive && s_alive)
+            ss = p_ss_full + s_ss_full;
+        else if (p_alive)
+            ss = input.has_spouse ? std::max(p_ss_full, s_ss_full) : p_ss_full;
+        else if (s_alive)
+            ss = std::max(p_ss_full, s_ss_full);
+
         double pension = 0.0;
-        if (age >= input.pension_start_age && input.pension_annual > 0.0)
+        if (p_alive && age >= input.pension_start_age && input.pension_annual > 0.0)
         {
             double p_inf = input.pension_cola ? inf
-                                              : std::pow(1.0 + input.inflation,
-                                                         std::max(0, input.pension_start_age - input.current_age));
-            pension = input.pension_annual * p_inf;
+                : std::pow(1.0 + input.inflation, std::max(0, input.pension_start_age - input.current_age));
+            pension += input.pension_annual * p_inf;
+        }
+        if (s_alive && sp_age >= input.spouse_pension_start_age && input.spouse_pension_annual > 0.0)
+        {
+            double sp_inf = input.spouse_pension_cola ? inf
+                : std::pow(1.0 + input.inflation, std::max(0, input.spouse_pension_start_age - input.spouse_current_age));
+            pension += input.spouse_pension_annual * sp_inf;
         }
         yp.ss_income = ss;
         yp.pension_income = pension;
 
         // 3. Required Minimum Distribution (RMD)
         double rmd = 0.0;
-        if (age >= input.rmd_start_age && bal_def > 0.0)
-            rmd = std::min(bal_def, bal_def / rmd_divisor(age));
+        if (bal_def > 0.0)
+        {
+            if (input.has_spouse && p_alive && s_alive)
+            {
+                if (age >= input.rmd_start_age)
+                    rmd += (0.5 * bal_def) / rmd_divisor(age);
+                if (sp_age >= input.spouse_rmd_start_age)
+                    rmd += (0.5 * bal_def) / rmd_divisor(sp_age);
+            }
+            else if (p_alive && age >= input.rmd_start_age)
+            {
+                rmd = bal_def / rmd_divisor(age);
+            }
+            else if (s_alive && sp_age >= input.spouse_rmd_start_age)
+            {
+                rmd = bal_def / rmd_divisor(sp_age);
+            }
+            rmd = std::min(bal_def, rmd);
+        }
         yp.rmd_amount = rmd;
 
         // 4. Withdrawals & Roth Conversions
@@ -391,7 +454,7 @@ PlanResult simulate_with_returns(const PlanInput& input,
             {
                 double ord_inc = pension + w_def + roth_conv;
                 double cg = w_tax * gain_ratio();
-                TaxBreakdown tb = compute_year_taxes(input, ord_inc, ss, cg, ord_inc, true, age, inf);
+                TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cg, ord_inc, true, tax_age, aca_adults, inf);
                 double current_net = ss + pension + w_tax + w_def + w_hsa + w_roth - tb.total();
                 double gap = target_net - current_net;
                 if (gap <= 1.0)
@@ -432,10 +495,10 @@ PlanResult simulate_with_returns(const PlanInput& input,
             double conv_rate = roth_conversion_target_rate(strategy);
             if (conv_rate > 0.0 && bal_def > 0.0)
             {
-                double ded = standard_deduction(input.filing_status, age, inf);
-                double ceiling = bracket_ceiling_taxable(input.filing_status, conv_rate, inf);
+                double ded = standard_deduction(year_status, tax_age, inf);
+                double ceiling = bracket_ceiling_taxable(year_status, conv_rate, inf);
                 double ss_tax = taxable_ss_portion(ss, pension + w_def, w_tax * gain_ratio(),
-                                                   input.filing_status);
+                                                   year_status);
                 double current_taxable_ord = std::max(0.0, pension + w_def + ss_tax - ded);
                 double headroom = std::max(0.0, ceiling - current_taxable_ord);
                 double conv = std::min(bal_def, headroom);
@@ -444,9 +507,9 @@ PlanResult simulate_with_returns(const PlanInput& input,
                 if (conv > 0.0)
                 {
                     TaxBreakdown tb_before = compute_year_taxes(
-                        input, pension + w_def, ss, w_tax * gain_ratio(), pension + w_def, true, age, inf);
+                        input, year_status, pension + w_def, ss, w_tax * gain_ratio(), pension + w_def, true, tax_age, aca_adults, inf);
                     TaxBreakdown tb_after = compute_year_taxes(
-                        input, pension + w_def + conv, ss, w_tax * gain_ratio(), pension + w_def + conv, true, age, inf);
+                        input, year_status, pension + w_def + conv, ss, w_tax * gain_ratio(), pension + w_def + conv, true, tax_age, aca_adults, inf);
                     double extra_tax = std::max(0.0, tb_after.total() - tb_before.total());
                     if (extra_tax <= bal_tax)
                     {
@@ -472,7 +535,7 @@ PlanResult simulate_with_returns(const PlanInput& input,
         // Compute final taxes for the year
         double cap_gains = w_tax * gain_ratio();
         double ord_inc = pension + w_def + roth_conv;
-        TaxBreakdown tb = compute_year_taxes(input, ord_inc, ss, cap_gains, ord_inc, retired, age, inf);
+        TaxBreakdown tb = compute_year_taxes(input, year_status, ord_inc, ss, cap_gains, ord_inc, retired, tax_age, aca_adults, inf);
 
         double gross_inflow = ss + pension + w_tax + w_def + w_hsa + w_roth;
         double net_spend = retired ? std::max(0.0, gross_inflow - tb.total()) : 0.0;
@@ -535,14 +598,15 @@ PlanResult simulate_with_returns(const PlanInput& input,
     return res;
 }
 
-double find_max_spending(const PlanInput& input, WithdrawalStrategy s, int ss_age)
+double find_max_spending(const PlanInput& input, WithdrawalStrategy s, int ss_age, int spouse_ss_age)
 {
     double lo = 0.0;
-    double hi = std::max(50000.0, input.initial_balances.total() * 0.25 + input.ss_fra_annual + input.pension_annual + 100000.0);
+    double hi = std::max(50000.0, input.initial_balances.total() * 0.25 + input.ss_fra_annual +
+                         input.spouse_ss_fra_annual + input.pension_annual + input.spouse_pension_annual + 100000.0);
     for (int iter = 0; iter < 32; ++iter)
     {
         double mid = 0.5 * (lo + hi);
-        PlanResult r = simulate_plan(input, s, ss_age, mid);
+        PlanResult r = simulate_plan(input, s, ss_age, mid, spouse_ss_age);
         if (r.plan_feasible)
             lo = mid;
         else
@@ -604,21 +668,27 @@ double adjusted_social_security(double fra_annual, int claim_age) noexcept
 PlanResult simulate_plan(const PlanInput& input,
                          WithdrawalStrategy strategy,
                          int ss_claim_age,
-                         double annual_spending_real)
+                         double annual_spending_real,
+                         int spouse_ss_claim_age)
 {
-    const int n_years = std::max(1, input.horizon_age - input.current_age + 1);
+    const int sp_ss = (spouse_ss_claim_age >= 62 && spouse_ss_claim_age <= 70)
+                      ? spouse_ss_claim_age : input.spouse_ss_claim_age;
+    const int n_years = plan_num_years(input);
     std::vector<double> returns(static_cast<size_t>(n_years), input.nominal_return);
-    return simulate_with_returns(input, strategy, ss_claim_age, annual_spending_real, returns);
+    return simulate_with_returns(input, strategy, ss_claim_age, sp_ss, annual_spending_real, returns);
 }
 
 MonteCarloSummary run_monte_carlo(const PlanInput& input,
                                   WithdrawalStrategy strategy,
                                   int ss_claim_age,
-                                  double annual_spending_real)
+                                  double annual_spending_real,
+                                  int spouse_ss_claim_age)
 {
+    const int sp_ss = (spouse_ss_claim_age >= 62 && spouse_ss_claim_age <= 70)
+                      ? spouse_ss_claim_age : input.spouse_ss_claim_age;
     MonteCarloSummary mc;
     mc.trials = std::max(1, input.monte_carlo_trials);
-    const int n_years = std::max(1, input.horizon_age - input.current_age + 1);
+    const int n_years = plan_num_years(input);
 
     std::mt19937 rng(input.random_seed);
     std::normal_distribution<double> dist(input.nominal_return, std::max(0.0, input.volatility));
@@ -637,7 +707,7 @@ MonteCarloSummary run_monte_carlo(const PlanInput& input,
             returns[static_cast<size_t>(y)] = std::clamp(dist(rng), -0.60, 0.80);
 
         PlanResult r = simulate_with_returns(
-            input, strategy, ss_claim_age, annual_spending_real, returns);
+            input, strategy, ss_claim_age, sp_ss, annual_spending_real, returns);
         if (!r.schedule.empty())
         {
             end_balances.push_back(r.final_bequest_real);
@@ -687,20 +757,20 @@ MonteCarloSummary run_monte_carlo(const PlanInput& input,
 
 PlanResult optimize_plan(const PlanInput& input)
 {
-    // Baseline: StandardTaxableFirst at user's specified SS age
+    // Baseline: StandardTaxableFirst at user's specified SS age(s)
     PlanResult baseline;
     if (input.objective == PlanObjective::MaximizeSpending)
     {
         double base_spend = find_max_spending(
-            input, WithdrawalStrategy::StandardTaxableFirst, input.ss_claim_age);
+            input, WithdrawalStrategy::StandardTaxableFirst, input.ss_claim_age, input.spouse_ss_claim_age);
         baseline = simulate_plan(
-            input, WithdrawalStrategy::StandardTaxableFirst, input.ss_claim_age, base_spend);
+            input, WithdrawalStrategy::StandardTaxableFirst, input.ss_claim_age, base_spend, input.spouse_ss_claim_age);
     }
     else
     {
         baseline = simulate_plan(
             input, WithdrawalStrategy::StandardTaxableFirst, input.ss_claim_age,
-            input.target_annual_spending);
+            input.target_annual_spending, input.spouse_ss_claim_age);
     }
 
     std::vector<WithdrawalStrategy> candidates;
@@ -722,39 +792,57 @@ PlanResult optimize_plan(const PlanInput& input)
     int ss_min = input.optimize_ss_age ? 62 : input.ss_claim_age;
     int ss_max = input.optimize_ss_age ? 70 : input.ss_claim_age;
 
+    std::vector<int> sp_ss_candidates;
+    if (input.has_spouse && input.spouse_optimize_ss_age)
+        sp_ss_candidates = {62, 65, 67, 70};
+    else
+        sp_ss_candidates = {input.spouse_ss_claim_age};
+
     PlanResult best = baseline;
     double best_score = (input.objective == PlanObjective::MaximizeSpending)
                         ? baseline.sustainable_spending_real
                         : baseline.final_bequest_real;
 
+    auto eval_candidate = [&](WithdrawalStrategy s, int ss_age, int sp_ss_age) {
+        PlanResult cand;
+        if (input.objective == PlanObjective::MaximizeSpending)
+        {
+            double max_sp = find_max_spending(input, s, ss_age, sp_ss_age);
+            cand = simulate_plan(input, s, ss_age, max_sp, sp_ss_age);
+            if (cand.sustainable_spending_real > best_score)
+            {
+                best_score = cand.sustainable_spending_real;
+                best = std::move(cand);
+            }
+        }
+        else
+        {
+            cand = simulate_plan(input, s, ss_age, input.target_annual_spending, sp_ss_age);
+            double score = cand.plan_feasible
+                           ? cand.final_bequest_real
+                           : (cand.sustainable_spending_real - input.target_annual_spending);
+            if (score > best_score)
+            {
+                best_score = score;
+                best = std::move(cand);
+            }
+        }
+    };
+
     for (WithdrawalStrategy s : candidates)
     {
         for (int ss_age = ss_min; ss_age <= ss_max; ++ss_age)
         {
-            PlanResult cand;
-            if (input.objective == PlanObjective::MaximizeSpending)
-            {
-                double max_sp = find_max_spending(input, s, ss_age);
-                cand = simulate_plan(input, s, ss_age, max_sp);
-                if (cand.sustainable_spending_real > best_score)
-                {
-                    best_score = cand.sustainable_spending_real;
-                    best = std::move(cand);
-                }
-            }
-            else
-            {
-                cand = simulate_plan(input, s, ss_age, input.target_annual_spending);
-                double score = cand.plan_feasible
-                               ? cand.final_bequest_real
-                               : (cand.sustainable_spending_real - input.target_annual_spending);
-                if (score > best_score)
-                {
-                    best_score = score;
-                    best = std::move(cand);
-                }
-            }
+            for (int sp_ss_age : sp_ss_candidates)
+                eval_candidate(s, ss_age, sp_ss_age);
         }
+    }
+
+    // Fine-tune spouse SS age across 62..70 at the winning strategy & primary SS age
+    if (input.has_spouse && input.spouse_optimize_ss_age)
+    {
+        for (int sp_ss_age = 62; sp_ss_age <= 70; ++sp_ss_age)
+            eval_candidate(best.chosen_strategy, best.chosen_ss_age, sp_ss_age);
     }
 
     best.baseline_spending_real = baseline.sustainable_spending_real;
@@ -763,7 +851,7 @@ PlanResult optimize_plan(const PlanInput& input)
 
     if (input.objective == PlanObjective::MaximizeSpending)
     {
-        int ret_years = std::max(1, input.horizon_age - input.retirement_age + 1);
+        int ret_years = std::max(1, plan_num_years(input) - std::max(0, input.retirement_age - input.current_age));
         best.advantage_real = (best.sustainable_spending_real - baseline.sustainable_spending_real) * ret_years;
     }
     else
@@ -772,7 +860,8 @@ PlanResult optimize_plan(const PlanInput& input)
     }
 
     best.monte_carlo = run_monte_carlo(
-        input, best.chosen_strategy, best.chosen_ss_age, best.sustainable_spending_real);
+        input, best.chosen_strategy, best.chosen_ss_age,
+        best.sustainable_spending_real, best.chosen_spouse_ss_age);
 
     return best;
 }
@@ -1057,6 +1146,19 @@ std::string serialize_plan_ini(
     oss << "aca_enforce_400_cliff=" << (input.aca_enforce_400_cliff ? "true" : "false") << "\n";
     oss << "monte_carlo_trials=" << input.monte_carlo_trials << "\n";
     oss << "random_seed=" << input.random_seed << "\n";
+    oss << "has_spouse=" << (input.has_spouse ? "true" : "false") << "\n";
+    oss << "spouse_current_age=" << input.spouse_current_age << "\n";
+    oss << "spouse_retirement_age=" << input.spouse_retirement_age << "\n";
+    oss << "spouse_horizon_age=" << input.spouse_horizon_age << "\n";
+    oss << "spouse_ss_fra_annual=" << input.spouse_ss_fra_annual << "\n";
+    oss << "spouse_ss_claim_age=" << input.spouse_ss_claim_age << "\n";
+    oss << "spouse_optimize_ss_age=" << (input.spouse_optimize_ss_age ? "true" : "false") << "\n";
+    oss << "spouse_pension_annual=" << input.spouse_pension_annual << "\n";
+    oss << "spouse_pension_start_age=" << input.spouse_pension_start_age << "\n";
+    oss << "spouse_pension_cola=" << (input.spouse_pension_cola ? "true" : "false") << "\n";
+    oss << "spouse_rmd_start_age=" << input.spouse_rmd_start_age << "\n";
+    oss << "spouse_contrib_tax_deferred=" << input.spouse_contrib_tax_deferred << "\n";
+    oss << "spouse_contrib_tax_free=" << input.spouse_contrib_tax_free << "\n";
 
     if (!account_overrides.empty())
     {
@@ -1150,6 +1252,19 @@ bool deserialize_plan_ini(
                 else if (lkey == "aca_enforce_400_cliff") { in.aca_enforce_400_cliff = parse_bool(val, in.aca_enforce_400_cliff); saw_plan_key = true; }
                 else if (lkey == "monte_carlo_trials") { in.monte_carlo_trials = std::clamp(std::stoi(val), 10, 5000); saw_plan_key = true; }
                 else if (lkey == "random_seed") { in.random_seed = static_cast<uint32_t>(std::stoul(val)); saw_plan_key = true; }
+                else if (lkey == "has_spouse") { in.has_spouse = parse_bool(val, in.has_spouse); saw_plan_key = true; }
+                else if (lkey == "spouse_current_age") { in.spouse_current_age = std::clamp(std::stoi(val), 18, 95); saw_plan_key = true; }
+                else if (lkey == "spouse_retirement_age") { in.spouse_retirement_age = std::clamp(std::stoi(val), 30, 95); saw_plan_key = true; }
+                else if (lkey == "spouse_horizon_age") { in.spouse_horizon_age = std::clamp(std::stoi(val), 65, 110); saw_plan_key = true; }
+                else if (lkey == "spouse_ss_fra_annual") { in.spouse_ss_fra_annual = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "spouse_ss_claim_age") { in.spouse_ss_claim_age = std::clamp(std::stoi(val), 62, 70); saw_plan_key = true; }
+                else if (lkey == "spouse_optimize_ss_age") { in.spouse_optimize_ss_age = parse_bool(val, in.spouse_optimize_ss_age); saw_plan_key = true; }
+                else if (lkey == "spouse_pension_annual") { in.spouse_pension_annual = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "spouse_pension_start_age") { in.spouse_pension_start_age = std::clamp(std::stoi(val), 50, 85); saw_plan_key = true; }
+                else if (lkey == "spouse_pension_cola") { in.spouse_pension_cola = parse_bool(val, in.spouse_pension_cola); saw_plan_key = true; }
+                else if (lkey == "spouse_rmd_start_age") { in.spouse_rmd_start_age = std::clamp(std::stoi(val), 72, 75); saw_plan_key = true; }
+                else if (lkey == "spouse_contrib_tax_deferred") { in.spouse_contrib_tax_deferred = std::max(0.0, std::stod(val)); saw_plan_key = true; }
+                else if (lkey == "spouse_contrib_tax_free") { in.spouse_contrib_tax_free = std::max(0.0, std::stod(val)); saw_plan_key = true; }
             }
             catch (...)
             {
@@ -1163,6 +1278,8 @@ bool deserialize_plan_ini(
 
     in.retirement_age = std::max(in.current_age, in.retirement_age);
     in.horizon_age = std::max(in.retirement_age + 1, in.horizon_age);
+    in.spouse_retirement_age = std::max(in.spouse_current_age, in.spouse_retirement_age);
+    in.spouse_horizon_age = std::max(in.spouse_retirement_age + 1, in.spouse_horizon_age);
     out_input = in;
     out_overrides = std::move(overrides);
     return true;

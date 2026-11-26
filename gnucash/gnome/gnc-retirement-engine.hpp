@@ -135,6 +135,21 @@ struct PlanInput
 
     int monte_carlo_trials = 300;
     uint32_t random_seed = 42;
+
+    // Optional Spouse / Partner (Two-Person Household)
+    bool has_spouse = false;
+    int spouse_current_age = 53;
+    int spouse_retirement_age = 65;
+    int spouse_horizon_age = 95;
+    double spouse_ss_fra_annual = 22000.0;
+    int spouse_ss_claim_age = 67;
+    bool spouse_optimize_ss_age = true;
+    double spouse_pension_annual = 0.0;
+    int spouse_pension_start_age = 65;
+    bool spouse_pension_cola = true;
+    int spouse_rmd_start_age = 73;
+    double spouse_contrib_tax_deferred = 0.0;
+    double spouse_contrib_tax_free = 0.0;
 };
 
 struct YearProjection
@@ -198,6 +213,7 @@ struct PlanResult
 {
     WithdrawalStrategy chosen_strategy = WithdrawalStrategy::StandardTaxableFirst;
     int chosen_ss_age = 67;
+    int chosen_spouse_ss_age = 67;
 
     double sustainable_spending_real = 0.0;
     double final_bequest_real = 0.0;
@@ -224,11 +240,12 @@ double rmd_divisor(int age) noexcept;
 /** Compute Social Security annual benefit adjusted for claiming age (62..70). */
 double adjusted_social_security(double fra_annual, int claim_age) noexcept;
 
-/** Run a single deterministic projection for the given input, strategy, and SS age. */
+/** Run a single deterministic projection for the given input, strategy, and SS age(s). */
 PlanResult simulate_plan(const PlanInput& input,
                          WithdrawalStrategy strategy,
                          int ss_claim_age,
-                         double annual_spending_real);
+                         double annual_spending_real,
+                         int spouse_ss_claim_age = -1);
 
 /** Optimize withdrawal strategy, Roth conversions, and optionally SS claiming age. */
 PlanResult optimize_plan(const PlanInput& input);
@@ -237,7 +254,8 @@ PlanResult optimize_plan(const PlanInput& input);
 MonteCarloSummary run_monte_carlo(const PlanInput& input,
                                   WithdrawalStrategy strategy,
                                   int ss_claim_age,
-                                  double annual_spending_real);
+                                  double annual_spending_real,
+                                  int spouse_ss_claim_age = -1);
 
 /** Human-readable name for a WithdrawalStrategy. */
 const char* strategy_label(WithdrawalStrategy s) noexcept;
