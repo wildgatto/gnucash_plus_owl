@@ -2106,6 +2106,23 @@ std::string parse_json_string_at(const std::string& json, size_t qpos)
                 case 'n':  out.push_back('\n'); break;
                 case 'r':  out.push_back('\r'); break;
                 case 't':  out.push_back('\t'); break;
+                case 'u':
+                    if (i + 4 < json.size())
+                    {
+                        try
+                        {
+                            unsigned int cp = static_cast<unsigned int>(std::stoul(json.substr(i + 1, 4), nullptr, 16));
+                            if (cp < 0x80)
+                                out.push_back(static_cast<char>(cp));
+                            i += 4;
+                        }
+                        catch (...) { out.push_back('u'); }
+                    }
+                    else
+                    {
+                        out.push_back('u');
+                    }
+                    break;
                 default:   out.push_back(esc); break;
             }
         }
@@ -2231,10 +2248,12 @@ std::string build_ai_request_json(AiProvider provider,
     if (provider == AiProvider::Ollama)
     {
         oss << "{\"model\":\"" << json_escape(model) << "\","
-            << "\"system\":\"" << json_escape(system_prompt) << "\","
-            << "\"prompt\":\"" << json_escape(user_prompt) << "\","
             << "\"stream\":" << (stream ? "true" : "false") << ","
-            << "\"options\":{\"num_ctx\":" << num_ctx << ",\"num_predict\":" << max_tokens << "}}";
+            << "\"options\":{\"num_ctx\":" << num_ctx << ",\"num_predict\":" << max_tokens << "},"
+            << "\"messages\":["
+            << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},"
+            << "{\"role\":\"user\",\"content\":\"" << json_escape(user_prompt) << "\"}"
+            << "]}";
     }
     else if (provider == AiProvider::Gemini)
     {

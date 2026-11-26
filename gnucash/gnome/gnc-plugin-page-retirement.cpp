@@ -2241,7 +2241,7 @@ on_ai_provider_changed(GtkComboBox*, gpointer user_data)
     int idx = gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider));
     if (idx == 0)
     {
-        gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/generate");
+        gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/chat");
         populate_ai_model_list(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
     }
     else if (idx == 1)
@@ -2579,7 +2579,13 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
     }
 
     std::string url = endpoint;
-    if (provider == AiProvider::Gemini && endpoint.find(":streamGenerateContent") == std::string::npos)
+    if (provider == AiProvider::Ollama)
+    {
+        size_t gp = url.find("/api/generate");
+        if (gp != std::string::npos)
+            url.replace(gp, 13, "/api/chat");
+    }
+    else if (provider == AiProvider::Gemini && endpoint.find(":streamGenerateContent") == std::string::npos)
     {
         if (!url.empty() && url.back() == '/') url.pop_back();
         url += "/models/" + model + ":streamGenerateContent?alt=sse";
@@ -2592,7 +2598,7 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
         "bridge_income_annual, enable_guardrails, enable_glide_path, equity_pct_in_ret, ltc_years.";
     std::string full_prompt = build_ai_plan_summary(priv->last_input, priv->last_result)
                             + "\nQuestion: " + user_question;
-    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, true, 1024, 384);
+    std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, true, 2048, 512);
 
     SoupMessage* msg = soup_message_new("POST", url.c_str());
     if (!msg)
@@ -3829,7 +3835,7 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     g_signal_connect(priv->combo_ai_provider, "changed", G_CALLBACK(on_ai_provider_changed), priv);
 
     priv->entry_ai_endpoint = GTK_ENTRY(gtk_entry_new());
-    gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/generate");
+    gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/chat");
     gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ai_endpoint), TRUE);
 
     priv->combo_ai_model = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new_with_entry());
