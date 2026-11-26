@@ -415,3 +415,58 @@ TEST(RetirementEngine, SequenceStressTestsAndSensitivityMatrix)
     EXPECT_FALSE(mat.cells[0][4].feasible);
     EXPECT_GT(mat.cells[0][4].shortfall_years, 0);
 }
+
+TEST(RetirementEngine, CustomCostBasisAndPerBucketReturns)
+{
+    PlanInput base;
+    base.current_age = 60;
+    base.retirement_age = 65;
+    base.horizon_age = 85;
+    base.initial_balances.taxable = 400000.0;
+    base.initial_balances.tax_free = 200000.0;
+    base.contrib_taxable = 0.0;
+    base.contrib_tax_deferred = 0.0;
+    base.contrib_tax_free = 0.0;
+    base.contrib_hsa = 0.0;
+    base.nominal_return = 0.06;
+    base.ss_fra_annual = 0.0;
+    base.optimize_ss_age = false;
+    base.strategy = WithdrawalStrategy::StandardTaxableFirst;
+    base.monte_carlo_trials = 10;
+
+    // 1. Lower cost basis (20%) means more embedded gains -> higher lifetime taxes than 95% basis
+    PlanInput low_basis = base;
+    low_basis.initial_balances.taxable = 2000000.0;
+    low_basis.pension_annual = 80000.0;
+    low_basis.pension_start_age = 65;
+    low_basis.enable_aca = false;
+    low_basis.taxable_basis_pct = 0.20;
+    PlanInput high_basis = low_basis;
+    high_basis.taxable_basis_pct = 0.95;
+
+    PlanResult r_low_b = simulate_plan(low_basis, WithdrawalStrategy::StandardTaxableFirst, 67, 160000.0);
+    PlanResult r_high_b = simulate_plan(high_basis, WithdrawalStrategy::StandardTaxableFirst, 67, 160000.0);
+    EXPECT_GT(r_low_b.lifetime_taxes_real, r_high_b.lifetime_taxes_real);
+
+    // 2. Per-bucket return: boosting Roth return increases ending tax-free balance
+    PlanInput high_roth = base;
+    high_roth.return_tax_free = 0.09;
+    high_roth.return_taxable = 0.04;
+    PlanResult r_base = simulate_plan(base, WithdrawalStrategy::StandardTaxableFirst, 67, 25000.0);
+    PlanResult r_per_b = simulate_plan(high_roth, WithdrawalStrategy::StandardTaxableFirst, 67, 25000.0);
+    EXPECT_GT(r_per_b.schedule.back().end_tax_free, r_base.schedule.back().end_tax_free);
+
+    // 3. INI round-trip preserves cost basis % and per-bucket returns
+    high_roth.taxable_basis_pct = 0.45;
+    high_roth.return_tax_deferred = 0.07;
+    high_roth.return_hsa = 0.05;
+    std::string ini = serialize_plan_ini(high_roth);
+    PlanInput rt;
+    std::vector<std::pair<std::string, TaxBucket>> ov;
+    ASSERT_TRUE(deserialize_plan_ini(ini, rt, ov));
+    EXPECT_DOUBLE_EQ(rt.taxable_basis_pct, 0.45);
+    EXPECT_DOUBLE_EQ(rt.return_taxable, 0.04);
+    EXPECT_DOUBLE_EQ(rt.return_tax_deferred, 0.07);
+    EXPECT_DOUBLE_EQ(rt.return_tax_free, 0.09);
+    EXPECT_DOUBLE_EQ(rt.return_hsa, 0.05);
+}

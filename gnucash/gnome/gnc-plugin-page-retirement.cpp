@@ -161,6 +161,11 @@ struct GncPluginPageRetirementPrivate
     GtkSpinButton* spin_return_pct = nullptr;
     GtkSpinButton* spin_vol_pct = nullptr;
     GtkSpinButton* spin_inf_pct = nullptr;
+    GtkSpinButton* spin_ret_taxable = nullptr;      // per-bucket return: taxable
+    GtkSpinButton* spin_ret_tax_def = nullptr;      // per-bucket return: tax-deferred
+    GtkSpinButton* spin_ret_tax_free = nullptr;     // per-bucket return: tax-free (Roth)
+    GtkSpinButton* spin_ret_hsa = nullptr;          // per-bucket return: HSA
+    GtkSpinButton* spin_basis_pct = nullptr;        // taxable cost-basis %
     GtkSpinButton* spin_rmd_age = nullptr;
     GtkComboBoxText* combo_state = nullptr;
     GtkCheckButton* chk_enable_aca = nullptr;
@@ -520,6 +525,12 @@ read_plan_input_from_ui(GncPluginPageRetirementPrivate* priv)
     in.nominal_return = gtk_spin_button_get_value(priv->spin_return_pct) / 100.0;
     in.volatility = gtk_spin_button_get_value(priv->spin_vol_pct) / 100.0;
     in.inflation = gtk_spin_button_get_value(priv->spin_inf_pct) / 100.0;
+    in.return_taxable     = gtk_spin_button_get_value(priv->spin_ret_taxable)  / 100.0;
+    in.return_tax_deferred= gtk_spin_button_get_value(priv->spin_ret_tax_def)  / 100.0;
+    in.return_tax_free    = gtk_spin_button_get_value(priv->spin_ret_tax_free) / 100.0;
+    in.return_hsa         = gtk_spin_button_get_value(priv->spin_ret_hsa)      / 100.0;
+    in.taxable_basis_pct  = gtk_spin_button_get_value(priv->spin_basis_pct)    / 100.0;
+    in.initial_balances.taxable_basis = in.initial_balances.taxable * in.taxable_basis_pct;
     in.rmd_start_age = gtk_spin_button_get_value_as_int(priv->spin_rmd_age);
     in.state = static_cast<USState>(
         std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_state)), 0, 51));
@@ -614,6 +625,11 @@ apply_plan_input_to_ui(GncPluginPageRetirementPrivate* priv, const PlanInput& in
     gtk_spin_button_set_value(priv->spin_return_pct, in.nominal_return * 100.0);
     gtk_spin_button_set_value(priv->spin_vol_pct, in.volatility * 100.0);
     gtk_spin_button_set_value(priv->spin_inf_pct, in.inflation * 100.0);
+    gtk_spin_button_set_value(priv->spin_ret_taxable,  in.return_taxable      * 100.0);
+    gtk_spin_button_set_value(priv->spin_ret_tax_def,  in.return_tax_deferred * 100.0);
+    gtk_spin_button_set_value(priv->spin_ret_tax_free, in.return_tax_free     * 100.0);
+    gtk_spin_button_set_value(priv->spin_ret_hsa,      in.return_hsa          * 100.0);
+    gtk_spin_button_set_value(priv->spin_basis_pct,    in.taxable_basis_pct   * 100.0);
     gtk_spin_button_set_value(priv->spin_rmd_age, in.rmd_start_age);
     gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_state),
                              std::clamp(static_cast<int>(in.state), 0, 51));
@@ -710,6 +726,11 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv)
     g_key_file_set_double(state, STATE_GROUP_PLAN, "nominal_return", in.nominal_return);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "volatility", in.volatility);
     g_key_file_set_double(state, STATE_GROUP_PLAN, "inflation", in.inflation);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "return_taxable",      in.return_taxable);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "return_tax_deferred", in.return_tax_deferred);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "return_tax_free",     in.return_tax_free);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "return_hsa",          in.return_hsa);
+    g_key_file_set_double(state, STATE_GROUP_PLAN, "taxable_basis_pct",   in.taxable_basis_pct);
     g_key_file_set_integer(state, STATE_GROUP_PLAN, "rmd_start_age", in.rmd_start_age);
     g_key_file_set_string(state, STATE_GROUP_PLAN, "state", state_code(in.state));
     g_key_file_set_boolean(state, STATE_GROUP_PLAN, "enable_aca", in.enable_aca);
@@ -811,6 +832,11 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     in.nominal_return = std::clamp(get_dbl("nominal_return", in.nominal_return), 0.0, 0.25);
     in.volatility = std::clamp(get_dbl("volatility", in.volatility), 0.0, 0.50);
     in.inflation = std::clamp(get_dbl("inflation", in.inflation), 0.0, 0.15);
+    in.return_taxable      = std::clamp(get_dbl("return_taxable",      in.return_taxable),      0.0, 0.25);
+    in.return_tax_deferred = std::clamp(get_dbl("return_tax_deferred", in.return_tax_deferred), 0.0, 0.25);
+    in.return_tax_free     = std::clamp(get_dbl("return_tax_free",     in.return_tax_free),     0.0, 0.25);
+    in.return_hsa          = std::clamp(get_dbl("return_hsa",          in.return_hsa),          0.0, 0.25);
+    in.taxable_basis_pct   = std::clamp(get_dbl("taxable_basis_pct",   in.taxable_basis_pct),   0.0, 1.00);
     in.rmd_start_age = std::clamp(get_int("rmd_start_age", in.rmd_start_age), 72, 75);
     if (gchar* st = g_key_file_get_string(state, STATE_GROUP_PLAN, "state", nullptr))
     {
@@ -2122,6 +2148,11 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     priv->spin_return_pct = add_spin_row(g_mkt, r3, _("Expected Return (%)"), 0.0, 15.0, 0.25, 6.5, 2);
     priv->spin_vol_pct = add_spin_row(g_mkt, r3, _("Volatility (%)"), 0.0, 35.0, 0.5, 12.0, 1);
     priv->spin_inf_pct = add_spin_row(g_mkt, r3, _("Inflation (%)"), 0.0, 10.0, 0.25, 2.5, 2);
+    priv->spin_basis_pct = add_spin_row(g_mkt, r3, _("Taxable Basis (%)"), 0.0, 100.0, 5.0, 70.0, 1);
+    priv->spin_ret_taxable = add_spin_row(g_mkt, r3, _("Taxable Return (% 0=auto)"), 0.0, 15.0, 0.25, 0.0, 2);
+    priv->spin_ret_tax_def = add_spin_row(g_mkt, r3, _("401k/IRA Return (% 0=auto)"), 0.0, 15.0, 0.25, 0.0, 2);
+    priv->spin_ret_tax_free = add_spin_row(g_mkt, r3, _("Roth Return (% 0=auto)"), 0.0, 15.0, 0.25, 0.0, 2);
+    priv->spin_ret_hsa = add_spin_row(g_mkt, r3, _("HSA Return (% 0=auto)"), 0.0, 15.0, 0.25, 0.0, 2);
     priv->spin_rmd_age = add_spin_row(g_mkt, r3, _("RMD Start Age"), 72, 75, 1, 73);
 
     {

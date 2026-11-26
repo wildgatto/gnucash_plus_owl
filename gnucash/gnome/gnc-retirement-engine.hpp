@@ -127,9 +127,18 @@ struct PlanInput
     bool pension_cola = true;
 
     // Market & Economic assumptions
-    double nominal_return = 0.065;  // 6.5%
+    double nominal_return = 0.065;  // 6.5% blended (used as fallback for per-bucket rates)
     double volatility = 0.12;       // 12% std dev for Monte Carlo
     double inflation = 0.025;       // 2.5%
+
+    // Per-bucket return overrides (0.0 = inherit nominal_return)
+    double return_taxable     = 0.0; // Taxable brokerage expected return
+    double return_tax_deferred= 0.0; // 401k/IRA expected return
+    double return_tax_free    = 0.0; // Roth expected return
+    double return_hsa         = 0.0; // HSA expected return
+
+    // Cost-basis percentage for the taxable bucket (used for LTCG calculation)
+    double taxable_basis_pct  = 0.70; // 70% = 30% embedded gain on initial taxable balance
 
     // Strategy
     WithdrawalStrategy strategy = WithdrawalStrategy::AutoOptimize;

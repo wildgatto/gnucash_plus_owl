@@ -287,10 +287,24 @@ PlanResult simulate_with_returns(const PlanInput& input,
     res.schedule.reserve(static_cast<size_t>(n_years));
 
     double bal_tax = std::max(0.0, input.initial_balances.taxable);
-    double bal_basis = std::clamp(input.initial_balances.taxable_basis, 0.0, bal_tax);
+    // Prefer explicitly-set basis over auto-computed basis; fall back to taxable_basis_pct
+    double bal_basis = (input.initial_balances.taxable_basis > 0.0)
+        ? std::clamp(input.initial_balances.taxable_basis, 0.0, bal_tax)
+        : bal_tax * std::clamp(input.taxable_basis_pct, 0.0, 1.0);
     double bal_def = std::max(0.0, input.initial_balances.tax_deferred);
     double bal_roth = std::max(0.0, input.initial_balances.tax_free);
     double bal_hsa = std::max(0.0, input.initial_balances.hsa);
+
+    // Resolve effective per-bucket returns (0 -> inherit nominal_return)
+    auto effective_ret = [&](double bucket_rate, double year_ret) -> double {
+        // year_ret is the nominal_return-based draw; scale by bucket rate / nominal_return
+        // when bucket rate != 0.  For Monte Carlo, year_ret carries the volatility shock.
+        if (bucket_rate <= 0.0 || input.nominal_return <= 0.0)
+            return year_ret;
+        double ratio = bucket_rate / input.nominal_return;
+        // Preserve sign: shift from nominal to bucket by scaling the return
+        return ratio * year_ret + (bucket_rate - input.nominal_return * ratio);
+    };
 
     double cum_taxes_real = 0.0;
     double min_spending_real = std::numeric_limits<double>::infinity();
@@ -588,11 +602,14 @@ PlanResult simulate_with_returns(const PlanInput& input,
         if (retired && spend_mult > 0.0)
             min_spending_real = std::min(min_spending_real, net_spend_real / spend_mult);
 
-        // 5. Apply market return to remaining end-of-year balances
-        bal_tax *= (1.0 + ret);
-        bal_def *= (1.0 + ret);
-        bal_roth *= (1.0 + ret);
-        bal_hsa *= (1.0 + ret);
+        // 5. Apply market return to remaining end-of-year balances (per-bucket rates)
+        bal_tax  *= (1.0 + effective_ret(input.return_taxable,      ret));
+        bal_def  *= (1.0 + effective_ret(input.return_tax_deferred, ret));
+        bal_roth *= (1.0 + effective_ret(input.return_tax_free,     ret));
+        bal_hsa  *= (1.0 + effective_ret(input.return_hsa,          ret));
+        // Grow basis at the same rate as the taxable bucket (maintains gain ratio)
+        if (bal_tax > 1e-9)
+            bal_basis *= (1.0 + effective_ret(input.return_taxable, ret));
 
         double total_nom = bal_tax + bal_def + bal_roth + bal_hsa;
         double total_real = total_nom / inf;
@@ -1266,6 +1283,11 @@ std::string serialize_plan_ini(
     oss << "nominal_return=" << input.nominal_return << "\n";
     oss << "volatility=" << input.volatility << "\n";
     oss << "inflation=" << input.inflation << "\n";
+    oss << "return_taxable=" << input.return_taxable << "\n";
+    oss << "return_tax_deferred=" << input.return_tax_deferred << "\n";
+    oss << "return_tax_free=" << input.return_tax_free << "\n";
+    oss << "return_hsa=" << input.return_hsa << "\n";
+    oss << "taxable_basis_pct=" << input.taxable_basis_pct << "\n";
     oss << "rmd_start_age=" << input.rmd_start_age << "\n";
     oss << "state=" << state_code(input.state) << "\n";
     oss << "enable_aca=" << (input.enable_aca ? "true" : "false") << "\n";
@@ -1409,6 +1431,11 @@ bool deserialize_plan_ini(
                 else if (lkey == "nominal_return") { in.nominal_return = std::clamp(std::stod(val), 0.0, 0.25); saw_plan_key = true; }
                 else if (lkey == "volatility") { in.volatility = std::clamp(std::stod(val), 0.0, 0.50); saw_plan_key = true; }
                 else if (lkey == "inflation") { in.inflation = std::clamp(std::stod(val), 0.0, 0.15); saw_plan_key = true; }
+                else if (lkey == "return_taxable") { in.return_taxable = std::clamp(std::stod(val), 0.0, 0.25); saw_plan_key = true; }
+                else if (lkey == "return_tax_deferred") { in.return_tax_deferred = std::clamp(std::stod(val), 0.0, 0.25); saw_plan_key = true; }
+                else if (lkey == "return_tax_free") { in.return_tax_free = std::clamp(std::stod(val), 0.0, 0.25); saw_plan_key = true; }
+                else if (lkey == "return_hsa") { in.return_hsa = std::clamp(std::stod(val), 0.0, 0.25); saw_plan_key = true; }
+                else if (lkey == "taxable_basis_pct") { in.taxable_basis_pct = std::clamp(std::stod(val), 0.0, 1.0); saw_plan_key = true; }
                 else if (lkey == "rmd_start_age") { in.rmd_start_age = std::clamp(std::stoi(val), 72, 75); saw_plan_key = true; }
                 else if (lkey == "state") { in.state = state_from_code(val); saw_plan_key = true; }
                 else if (lkey == "enable_aca") { in.enable_aca = parse_bool(val, in.enable_aca); saw_plan_key = true; }
