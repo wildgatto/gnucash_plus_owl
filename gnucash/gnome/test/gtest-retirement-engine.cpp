@@ -679,4 +679,12 @@ TEST(RetirementEngine, AiSummaryRequestResponseAndWhatIfParser)
     EXPECT_EQ(mod.retirement_age, 62);
     EXPECT_TRUE(mod.enable_guardrails);
     EXPECT_EQ(changes.size(), 2u);
+
+    auto ol_models = extract_ai_models_list(AiProvider::Ollama, "{\"models\":[{\"name\":\"llama3.2:latest\"},{\"name\":\"qwen2.5:14b\"}]}");
+    ASSERT_EQ(ol_models.size(), 2u);
+    EXPECT_EQ(ol_models[0], "llama3.2:latest");
+
+    auto gem_models = extract_ai_models_list(AiProvider::Gemini, "{\"models\":[{\"name\":\"models/gemini-2.5-flash\"},{\"name\":\"models/embedding-001\"}]}");
+    ASSERT_EQ(gem_models.size(), 1u);
+    EXPECT_EQ(gem_models[0], "gemini-2.5-flash");
 }

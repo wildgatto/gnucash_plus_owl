@@ -459,6 +459,10 @@ std::string build_ai_request_json(AiProvider provider,
 std::string extract_ai_response_text(AiProvider provider,
                                      const std::string& response_json);
 
+/** Extract available model IDs/names from a provider's model-list JSON response. */
+std::vector<std::string> extract_ai_models_list(AiProvider provider,
+                                                const std::string& response_json);
+
 /** Parse a JSON What-If parameter block from AI text into PlanInput and list human-readable changes. */
 bool parse_ai_whatif_json(const std::string& ai_text,
                           PlanInput& in_out_plan,

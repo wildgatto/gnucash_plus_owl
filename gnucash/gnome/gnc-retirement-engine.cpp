@@ -2422,4 +2422,36 @@ bool parse_ai_whatif_json(const std::string& ai_text,
     return true;
 }
 
+std::vector<std::string> extract_ai_models_list(AiProvider provider,
+                                                const std::string& response_json)
+{
+    std::vector<std::string> models;
+    const std::string key = (provider == AiProvider::OpenAICompatible) ? "\"id\"" : "\"name\"";
+    size_t pos = 0;
+    while ((pos = response_json.find(key, pos)) != std::string::npos)
+    {
+        size_t colon = response_json.find(':', pos + key.size());
+        if (colon == std::string::npos)
+            break;
+        size_t val = colon + 1;
+        while (val < response_json.size() && std::isspace(static_cast<unsigned char>(response_json[val])))
+            ++val;
+        if (val < response_json.size() && response_json[val] == '"')
+        {
+            std::string m = parse_json_string_at(response_json, val);
+            if (provider == AiProvider::Gemini)
+            {
+                if (m.rfind("models/", 0) == 0)
+                    m = m.substr(7);
+                if (m.find("gemini") == std::string::npos)
+                    m.clear();
+            }
+            if (!m.empty() && std::find(models.begin(), models.end(), m) == models.end())
+                models.push_back(std::move(m));
+        }
+        pos += key.size();
+    }
+    return models;
+}
+
 } // namespace gnc::retirement

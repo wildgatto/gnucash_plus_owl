@@ -264,6 +264,7 @@ struct GncPluginPageRetirementPrivate
     // Ask Owl AI Advisor
     GtkComboBoxText* combo_ai_provider = nullptr;
     GtkEntry* entry_ai_endpoint = nullptr;
+    GtkComboBoxText* combo_ai_model = nullptr;
     GtkEntry* entry_ai_model = nullptr;
     GtkEntry* entry_ai_key = nullptr;
     GtkEntry* entry_ai_question = nullptr;
@@ -2201,6 +2202,37 @@ set_ai_response_text(GncPluginPageRetirementPrivate* priv, const std::string& te
 }
 
 static void
+ensure_soup_session(GncPluginPageRetirementPrivate* priv)
+{
+    if (!priv->soup_session)
+    {
+        priv->soup_session = soup_session_new();
+        soup_session_set_timeout(priv->soup_session, 180);
+        soup_session_set_idle_timeout(priv->soup_session, 180);
+    }
+}
+
+static void
+populate_ai_model_list(GncPluginPageRetirementPrivate* priv,
+                       const std::vector<std::string>& models,
+                       const char* preferred = nullptr)
+{
+    if (!priv->combo_ai_model)
+        return;
+    std::string cur = priv->entry_ai_model ? gtk_entry_get_text(priv->entry_ai_model) : "";
+    gtk_combo_box_text_remove_all(priv->combo_ai_model);
+    for (const auto& m : models)
+        gtk_combo_box_text_append_text(priv->combo_ai_model, m.c_str());
+
+    if (preferred && preferred[0] != '\0')
+        gtk_entry_set_text(priv->entry_ai_model, preferred);
+    else if (!cur.empty() && std::find(models.begin(), models.end(), cur) != models.end())
+        gtk_entry_set_text(priv->entry_ai_model, cur.c_str());
+    else if (!models.empty())
+        gtk_entry_set_text(priv->entry_ai_model, models.front().c_str());
+}
+
+static void
 on_ai_provider_changed(GtkComboBox*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
@@ -2208,17 +2240,17 @@ on_ai_provider_changed(GtkComboBox*, gpointer user_data)
     if (idx == 0)
     {
         gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/generate");
-        gtk_entry_set_text(priv->entry_ai_model, "llama3.2");
+        populate_ai_model_list(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
     }
     else if (idx == 1)
     {
         gtk_entry_set_text(priv->entry_ai_endpoint, "https://generativelanguage.googleapis.com/v1beta");
-        gtk_entry_set_text(priv->entry_ai_model, "gemini-2.5-flash");
+        populate_ai_model_list(priv, {"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"}, "gemini-2.5-flash");
     }
     else
     {
         gtk_entry_set_text(priv->entry_ai_endpoint, "https://api.openai.com/v1/chat/completions");
-        gtk_entry_set_text(priv->entry_ai_model, "gpt-4o-mini");
+        populate_ai_model_list(priv, {"gpt-4o-mini", "gpt-4o", "o3-mini"}, "gpt-4o-mini");
     }
 }
 
@@ -2227,6 +2259,109 @@ struct AiCallCtx
     GncPluginPageRetirementPrivate* priv = nullptr;
     AiProvider provider = AiProvider::Ollama;
 };
+
+static void
+on_ai_models_finished(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<AiCallCtx> ctx(static_cast<AiCallCtx*>(user_data));
+    GncPluginPageRetirementPrivate* priv = ctx->priv;
+    GError* err = nullptr;
+    GBytes* bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), res, &err);
+
+    if (!priv || !priv->root_widget)
+    {
+        if (bytes) g_bytes_unref(bytes);
+        if (err) g_error_free(err);
+        return;
+    }
+
+    if (!bytes)
+    {
+        std::string msg = std::string("Model list failed: ") + (err ? err->message : "Unknown error");
+        if (err) g_error_free(err);
+        if (priv->lbl_ai_status)
+            gtk_label_set_text(priv->lbl_ai_status, msg.c_str());
+        return;
+    }
+
+    gsize len = 0;
+    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
+    std::string resp_str(raw ? raw : "", len);
+    g_bytes_unref(bytes);
+
+    auto models = extract_ai_models_list(ctx->provider, resp_str);
+    if (models.empty())
+    {
+        if (priv->lbl_ai_status)
+            gtk_label_set_text(priv->lbl_ai_status, _("No models returned by provider."));
+        return;
+    }
+
+    populate_ai_model_list(priv, models);
+    if (priv->lbl_ai_status)
+    {
+        std::string st = "Loaded " + std::to_string(models.size()) + " models.";
+        gtk_label_set_text(priv->lbl_ai_status, st.c_str());
+    }
+}
+
+static void
+on_ai_refresh_models_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    ensure_soup_session(priv);
+
+    int p_idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
+    auto provider = static_cast<AiProvider>(p_idx);
+    std::string endpoint = gtk_entry_get_text(priv->entry_ai_endpoint);
+    std::string api_key = gtk_entry_get_text(priv->entry_ai_key);
+    if (api_key.empty())
+    {
+        const char* env_var = (provider == AiProvider::Gemini) ? g_getenv("GEMINI_API_KEY") : g_getenv("OPENAI_API_KEY");
+        if (env_var) api_key = env_var;
+    }
+
+    std::string url;
+    if (provider == AiProvider::Ollama)
+    {
+        size_t pos = endpoint.find("/api/");
+        url = (pos != std::string::npos) ? (endpoint.substr(0, pos) + "/api/tags") : (endpoint + "/api/tags");
+    }
+    else if (provider == AiProvider::Gemini)
+    {
+        url = endpoint;
+        if (!url.empty() && url.back() == '/') url.pop_back();
+        url += "/models";
+    }
+    else
+    {
+        size_t pos = endpoint.find("/chat/completions");
+        url = (pos != std::string::npos) ? (endpoint.substr(0, pos) + "/models") : (endpoint + "/models");
+    }
+
+    SoupMessage* msg = soup_message_new("GET", url.c_str());
+    if (!msg)
+    {
+        if (priv->lbl_ai_status)
+            gtk_label_set_text(priv->lbl_ai_status, _("Invalid endpoint URL."));
+        return;
+    }
+    if (provider == AiProvider::Gemini && !api_key.empty())
+        soup_message_headers_append(soup_message_get_request_headers(msg), "x-goog-api-key", api_key.c_str());
+    else if (provider == AiProvider::OpenAICompatible && !api_key.empty())
+    {
+        std::string auth = "Bearer " + api_key;
+        soup_message_headers_append(soup_message_get_request_headers(msg), "Authorization", auth.c_str());
+    }
+
+    if (priv->lbl_ai_status)
+        gtk_label_set_text(priv->lbl_ai_status, _("Fetching models..."));
+
+    auto* ctx = new AiCallCtx{priv, provider};
+    soup_session_send_and_read_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, nullptr,
+                                     on_ai_models_finished, ctx);
+    g_object_unref(msg);
+}
 
 static void
 on_ai_http_finished(GObject* source, GAsyncResult* res, gpointer user_data)
@@ -2291,8 +2426,7 @@ on_ai_http_finished(GObject* source, GAsyncResult* res, gpointer user_data)
 static void
 send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_question)
 {
-    if (!priv->soup_session)
-        priv->soup_session = soup_session_new();
+    ensure_soup_session(priv);
 
     int p_idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
     auto provider = static_cast<AiProvider>(p_idx);
@@ -3564,8 +3698,11 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/generate");
     gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ai_endpoint), TRUE);
 
-    priv->entry_ai_model = GTK_ENTRY(gtk_entry_new());
-    gtk_entry_set_text(priv->entry_ai_model, "llama3.2");
+    priv->combo_ai_model = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new_with_entry());
+    priv->entry_ai_model = GTK_ENTRY(gtk_bin_get_child(GTK_BIN(priv->combo_ai_model)));
+    populate_ai_model_list(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
+    GtkWidget* btn_ai_refresh = gtk_button_new_with_label(_("Refresh Models"));
+    g_signal_connect(btn_ai_refresh, "clicked", G_CALLBACK(on_ai_refresh_models_clicked), priv);
 
     priv->entry_ai_key = GTK_ENTRY(gtk_entry_new());
     gtk_entry_set_visibility(priv->entry_ai_key, FALSE);
@@ -3574,11 +3711,12 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Provider")), 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->combo_ai_provider), 1, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Model")), 2, 0, 1, 1);
-    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_model), 3, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->combo_ai_model), 3, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), btn_ai_refresh, 4, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Endpoint")), 0, 1, 1, 1);
-    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_endpoint), 1, 1, 3, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_endpoint), 1, 1, 4, 1);
     gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("API Key")), 0, 2, 1, 1);
-    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_key), 1, 2, 3, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_key), 1, 2, 4, 1);
     gtk_box_pack_start(GTK_BOX(tab_ai), ai_cfg, FALSE, FALSE, 0);
 
     GtkWidget* ai_qbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
