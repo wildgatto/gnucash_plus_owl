@@ -245,6 +245,7 @@ struct GncPluginPageRetirementPrivate
     GtkListStore* cmp_store = nullptr;
     GtkListStore* acct_store = nullptr;
     GtkTreeModelFilter* acct_filter = nullptr;
+    GtkTreeModelSort* acct_sort = nullptr;
     GtkSearchEntry* entry_acct_filter = nullptr;
     GtkLabel* lbl_acct_count = nullptr;
     GtkListStore* stress_store = nullptr;
@@ -3332,10 +3333,19 @@ on_remove_event_clicked(GtkButton*, gpointer user_data)
     GtkTreeModel* model = nullptr;
     if (gtk_tree_selection_get_selected(sel, &model, &iter))
     {
-        GtkTreePath* path = gtk_tree_model_get_path(model, &iter);
-        int* indices = gtk_tree_path_get_indices(path);
-        int idx = indices ? indices[0] : -1;
-        gtk_tree_path_free(path);
+        gint age = 0;
+        gchar* name = nullptr;
+        gtk_tree_model_get(model, &iter, 0, &age, 1, &name, -1);
+        int idx = -1;
+        for (size_t i = 0; i < priv->events.size(); ++i)
+        {
+            if (priv->events[i].age == age && name && priv->events[i].name == name)
+            {
+                idx = static_cast<int>(i);
+                break;
+            }
+        }
+        g_free(name);
         if (idx >= 0 && idx < static_cast<int>(priv->events.size()))
         {
             priv->events.erase(priv->events.begin() + idx);
@@ -3407,14 +3417,53 @@ on_acct_filter_changed(GtkSearchEntry*, gpointer user_data)
         gtk_tree_model_filter_refilter(priv->acct_filter);
 }
 
+static gint
+cmp_ret_currency_or_text(GtkTreeModel* model, GtkTreeIter* a, GtkTreeIter* b, gpointer data)
+{
+    int col = GPOINTER_TO_INT(data);
+    gchar* sa = nullptr;
+    gchar* sb = nullptr;
+    gtk_tree_model_get(model, a, col, &sa, -1);
+    gtk_tree_model_get(model, b, col, &sb, -1);
+    auto parse_num = [](const char* s, double& out) -> bool {
+        if (!s) return false;
+        std::string clean;
+        for (const char* p = s; *p; ++p)
+        {
+            if ((*p >= '0' && *p <= '9') || *p == '.' || *p == '-')
+                clean += *p;
+        }
+        if (clean.empty() || clean == "-" || clean == ".")
+            return false;
+        char* end = nullptr;
+        out = std::strtod(clean.c_str(), &end);
+        return end != clean.c_str();
+    };
+    double da = 0.0, db = 0.0;
+    int res = 0;
+    if (parse_num(sa, da) && parse_num(sb, db))
+        res = (da < db) ? -1 : ((da > db) ? 1 : 0);
+    else
+        res = g_strcmp0(sa, sb);
+    g_free(sa);
+    g_free(sb);
+    return res;
+}
+
 static void
 on_account_include_toggled(GtkCellRendererToggle*, gchar* path_str, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
-    GtkTreePath* filt_path = gtk_tree_path_new_from_string(path_str);
-    GtkTreeIter filt_iter;
-    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(priv->acct_filter), &filt_iter, filt_path))
+    GtkTreePath* sort_path = gtk_tree_path_new_from_string(path_str);
+    GtkTreeIter sort_iter;
+    GtkTreeModel* top_model = priv->acct_sort ? GTK_TREE_MODEL(priv->acct_sort) : GTK_TREE_MODEL(priv->acct_filter);
+    if (gtk_tree_model_get_iter(top_model, &sort_iter, sort_path))
     {
+        GtkTreeIter filt_iter;
+        if (priv->acct_sort)
+            gtk_tree_model_sort_convert_iter_to_child_iter(priv->acct_sort, &filt_iter, &sort_iter);
+        else
+            filt_iter = sort_iter;
         GtkTreeIter child_iter;
         gtk_tree_model_filter_convert_iter_to_child_iter(priv->acct_filter, &child_iter, &filt_iter);
         int orig_idx = -1;
@@ -3436,7 +3485,7 @@ on_account_include_toggled(GtkCellRendererToggle*, gchar* path_str, gpointer use
             run_planner(priv);
         }
     }
-    gtk_tree_path_free(filt_path);
+    gtk_tree_path_free(sort_path);
 }
 
 static void
@@ -3501,10 +3550,16 @@ static void
 on_bucket_edited(GtkCellRendererText*, gchar* path_str, gchar* new_text, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
-    GtkTreePath* filt_path = gtk_tree_path_new_from_string(path_str);
-    GtkTreeIter filt_iter;
-    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(priv->acct_filter), &filt_iter, filt_path))
+    GtkTreePath* sort_path = gtk_tree_path_new_from_string(path_str);
+    GtkTreeIter sort_iter;
+    GtkTreeModel* top_model = priv->acct_sort ? GTK_TREE_MODEL(priv->acct_sort) : GTK_TREE_MODEL(priv->acct_filter);
+    if (gtk_tree_model_get_iter(top_model, &sort_iter, sort_path))
     {
+        GtkTreeIter filt_iter;
+        if (priv->acct_sort)
+            gtk_tree_model_sort_convert_iter_to_child_iter(priv->acct_sort, &filt_iter, &sort_iter);
+        else
+            filt_iter = sort_iter;
         GtkTreeIter child_iter;
         gtk_tree_model_filter_convert_iter_to_child_iter(priv->acct_filter, &child_iter, &filt_iter);
         int orig_idx = -1;
@@ -3536,7 +3591,7 @@ on_bucket_edited(GtkCellRendererText*, gchar* path_str, gchar* new_text, gpointe
         save_state_to_book(priv);
         run_planner(priv);
     }
-    gtk_tree_path_free(filt_path);
+    gtk_tree_path_free(sort_path);
 }
 
 static GtkSpinButton*
@@ -3884,6 +3939,8 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
         priv->event_store = gtk_list_store_new(4, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
         GtkWidget* ev_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->event_store));
         priv->event_tv = GTK_TREE_VIEW(ev_tv);
+        gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->event_store), 2,
+                                        cmp_ret_currency_or_text, GINT_TO_POINTER(2), nullptr);
         const char* ev_titles[] = { "Age", "Name", "Amount", "Bucket" };
         for (int c = 0; c < 4; ++c)
         {
@@ -3892,6 +3949,7 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
             if (c == 2) g_object_set(r, "xalign", 1.0f, nullptr);
             GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(ev_titles[c], r, "text", c, nullptr);
             if (c == 1) gtk_tree_view_column_set_expand(col, TRUE);
+            gtk_tree_view_column_set_sort_column_id(col, c);
             gtk_tree_view_append_column(GTK_TREE_VIEW(ev_tv), col);
         }
 
@@ -3977,11 +4035,15 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     };
     for (int c = 0; c < NUM_SCHED_COLS; ++c)
     {
+        if (c >= 2 && c <= 13)
+            gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->sched_store), c,
+                                            cmp_ret_currency_or_text, GINT_TO_POINTER(c), nullptr);
         GtkCellRenderer* rend = gtk_cell_renderer_text_new();
         g_object_set(rend, "xalign", (c >= 2) ? 1.0f : 0.5f, nullptr);
         GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(
             sched_titles[c], rend, "text", c, nullptr);
         gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_column_set_sort_column_id(col, c);
         gtk_tree_view_append_column(GTK_TREE_VIEW(sched_tv), col);
     }
     GtkWidget* sched_scroll = gtk_scrolled_window_new(nullptr, nullptr);
@@ -3999,11 +4061,15 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     const char* cmp_titles[] = { "Metric", "Baseline (Taxable First)", "Owl Optimized", "Difference" };
     for (int c = 0; c < NUM_CMP_COLS; ++c)
     {
+        if (c >= 1)
+            gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->cmp_store), c,
+                                            cmp_ret_currency_or_text, GINT_TO_POINTER(c), nullptr);
         GtkCellRenderer* rend = gtk_cell_renderer_text_new();
         g_object_set(rend, "xalign", (c >= 1) ? 1.0f : 0.0f, nullptr);
         GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(
             cmp_titles[c], rend, "text", c, nullptr);
         gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_column_set_sort_column_id(col, c);
         gtk_tree_view_append_column(GTK_TREE_VIEW(cmp_tv), col);
     }
     GtkWidget* cmp_scroll = gtk_scrolled_window_new(nullptr, nullptr);
@@ -4048,13 +4114,18 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_box_pack_end(GTK_BOX(acct_bar), GTK_WIDGET(priv->lbl_acct_count), FALSE, FALSE, 4);
     gtk_box_pack_start(GTK_BOX(tab_acct), acct_bar, FALSE, FALSE, 0);
 
-    GtkWidget* acct_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->acct_filter));
+    priv->acct_sort = GTK_TREE_MODEL_SORT(
+        gtk_tree_model_sort_new_with_model(GTK_TREE_MODEL(priv->acct_filter)));
+    gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->acct_sort), ACCT_COL_BAL,
+                                    cmp_ret_currency_or_text, GINT_TO_POINTER(ACCT_COL_BAL), nullptr);
+    GtkWidget* acct_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->acct_sort));
 
     GtkCellRenderer* inc_rend = gtk_cell_renderer_toggle_new();
     g_signal_connect(inc_rend, "toggled", G_CALLBACK(on_account_include_toggled), priv);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv),
-        gtk_tree_view_column_new_with_attributes(_("Include"),
-            inc_rend, "active", ACCT_COL_INCLUDE, nullptr));
+    GtkTreeViewColumn* inc_col = gtk_tree_view_column_new_with_attributes(
+        _("Include"), inc_rend, "active", ACCT_COL_INCLUDE, nullptr);
+    gtk_tree_view_column_set_sort_column_id(inc_col, ACCT_COL_INCLUDE);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv), inc_col);
 
     GtkCellRenderer* acct_name_rend = gtk_cell_renderer_text_new();
     g_object_set(acct_name_rend, "ellipsize", PANGO_ELLIPSIZE_MIDDLE, nullptr);
@@ -4063,13 +4134,15 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_tree_view_column_set_expand(acct_name_col, TRUE);
     gtk_tree_view_column_set_min_width(acct_name_col, 160);
     gtk_tree_view_column_set_resizable(acct_name_col, TRUE);
+    gtk_tree_view_column_set_sort_column_id(acct_name_col, ACCT_COL_NAME);
     gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv), acct_name_col);
 
     GtkCellRenderer* bal_rend = gtk_cell_renderer_text_new();
     g_object_set(bal_rend, "xalign", 1.0f, nullptr);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv),
-        gtk_tree_view_column_new_with_attributes(_("Balance"),
-            bal_rend, "text", ACCT_COL_BAL, nullptr));
+    GtkTreeViewColumn* bal_col = gtk_tree_view_column_new_with_attributes(
+        _("Balance"), bal_rend, "text", ACCT_COL_BAL, nullptr);
+    gtk_tree_view_column_set_sort_column_id(bal_col, ACCT_COL_BAL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv), bal_col);
 
     GtkListStore* combo_model = gtk_list_store_new(1, G_TYPE_STRING);
     for (int b = 0; b <= static_cast<int>(TaxBucket::Excluded); ++b)
@@ -4083,9 +4156,10 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
                  "editable", TRUE, "has-entry", FALSE, nullptr);
     g_object_unref(combo_model);
     g_signal_connect(combo_rend, "edited", G_CALLBACK(on_bucket_edited), priv);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv),
-        gtk_tree_view_column_new_with_attributes(_("Tax Bucket (Click to Override)"),
-            combo_rend, "text", ACCT_COL_BUCKET_STR, nullptr));
+    GtkTreeViewColumn* bkt_col = gtk_tree_view_column_new_with_attributes(
+        _("Tax Bucket (Click to Override)"), combo_rend, "text", ACCT_COL_BUCKET_STR, nullptr);
+    gtk_tree_view_column_set_sort_column_id(bkt_col, ACCT_COL_BUCKET_STR);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(acct_tv), bkt_col);
 
     GtkWidget* acct_scroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(acct_scroll),
@@ -4113,6 +4187,9 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     };
     for (int c = 0; c < 5; ++c)
     {
+        if (c == 2 || c == 3)
+            gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->stress_store), c,
+                                            cmp_ret_currency_or_text, GINT_TO_POINTER(c), nullptr);
         GtkCellRenderer* rend = gtk_cell_renderer_text_new();
         g_object_set(rend, "xalign", (c >= 2) ? 1.0f : 0.0f, nullptr);
         GtkTreeViewColumn* col = nullptr;
@@ -4128,6 +4205,7 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
         }
         if (c == 0) gtk_tree_view_column_set_expand(col, TRUE);
         gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_column_set_sort_column_id(col, c);
         gtk_tree_view_append_column(GTK_TREE_VIEW(stress_tv), col);
     }
     GtkWidget* stress_scroll = gtk_scrolled_window_new(nullptr, nullptr);
@@ -4163,8 +4241,11 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
             col = gtk_tree_view_column_new_with_attributes(
                 sens_init_titles[c], rend, "text", c, "cell-background", 5 + c, nullptr);
         }
+        gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->sens_store), c,
+                                        cmp_ret_currency_or_text, GINT_TO_POINTER(c), nullptr);
         gtk_tree_view_column_set_expand(col, TRUE);
         gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_column_set_sort_column_id(col, c);
         gtk_tree_view_append_column(GTK_TREE_VIEW(sens_tv), col);
         priv->sens_cols[c] = col;
     }
@@ -4187,6 +4268,9 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     const char* hist_titles[6] = { "Historical Cycle", "Start", "Status", "Min Spend/yr", "Final Bequest", "Shortfall Yrs" };
     for (int c = 0; c < 6; ++c)
     {
+        if (c >= 3)
+            gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->hist_store), c,
+                                            cmp_ret_currency_or_text, GINT_TO_POINTER(c), nullptr);
         GtkCellRenderer* rend = gtk_cell_renderer_text_new();
         g_object_set(rend, "xalign", (c >= 3) ? 1.0f : 0.0f, nullptr);
         GtkTreeViewColumn* col = nullptr;
@@ -4202,6 +4286,7 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
         }
         gtk_tree_view_column_set_expand(col, c == 0);
         gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_column_set_sort_column_id(col, c);
         gtk_tree_view_append_column(GTK_TREE_VIEW(hist_tv), col);
     }
     GtkWidget* hist_scroll = gtk_scrolled_window_new(nullptr, nullptr);
@@ -4229,12 +4314,15 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     };
     for (int c = 0; c < 11; ++c)
     {
+        gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->ss_be_store), c,
+                                        cmp_ret_currency_or_text, GINT_TO_POINTER(c), nullptr);
         GtkCellRenderer* rend = gtk_cell_renderer_text_new();
         g_object_set(rend, "xalign", (c == 0) ? 0.5f : 1.0f, nullptr);
         GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(
             be_titles[c], rend, "text", c, nullptr);
         gtk_tree_view_column_set_expand(col, TRUE);
         gtk_tree_view_column_set_resizable(col, TRUE);
+        gtk_tree_view_column_set_sort_column_id(col, c);
         gtk_tree_view_append_column(GTK_TREE_VIEW(be_tv), col);
     }
     GtkWidget* be_scroll = gtk_scrolled_window_new(nullptr, nullptr);
@@ -4407,6 +4495,7 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         save_state_to_book(priv);
         g_object_unref(priv->sched_store);
         g_object_unref(priv->cmp_store);
+        if (priv->acct_sort) g_object_unref(priv->acct_sort);
         g_object_unref(priv->acct_filter);
         g_object_unref(priv->acct_store);
         g_object_unref(priv->event_store);
@@ -4428,6 +4517,7 @@ gnc_plugin_page_retirement_destroy_widget(GncPluginPage* plugin_page)
         priv->btn_ai_apply = nullptr;
         priv->sched_store = nullptr;
         priv->cmp_store = nullptr;
+        priv->acct_sort = nullptr;
         priv->acct_filter = nullptr;
         priv->acct_store = nullptr;
         priv->event_store = nullptr;

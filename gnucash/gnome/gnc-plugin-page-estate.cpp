@@ -2909,6 +2909,39 @@ on_estate_ai_copy(GtkButton*, gpointer user_data)
     if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Copied anonymized estate summary to clipboard."));
 }
 
+static gint
+cmp_currency_or_text(GtkTreeModel* model, GtkTreeIter* a, GtkTreeIter* b, gpointer data)
+{
+    int col = GPOINTER_TO_INT(data);
+    gchar* sa = nullptr;
+    gchar* sb = nullptr;
+    gtk_tree_model_get(model, a, col, &sa, -1);
+    gtk_tree_model_get(model, b, col, &sb, -1);
+    auto parse_num = [](const char* s, double& out) -> bool {
+        if (!s) return false;
+        std::string clean;
+        for (const char* p = s; *p; ++p)
+        {
+            if ((*p >= '0' && *p <= '9') || *p == '.' || *p == '-')
+                clean += *p;
+        }
+        if (clean.empty() || clean == "-" || clean == ".")
+            return false;
+        char* end = nullptr;
+        out = std::strtod(clean.c_str(), &end);
+        return end != clean.c_str();
+    };
+    double da = 0.0, db = 0.0;
+    int res = 0;
+    if (parse_num(sa, da) && parse_num(sb, db))
+        res = (da < db) ? -1 : ((da > db) ? 1 : 0);
+    else
+        res = g_strcmp0(sa, sb);
+    g_free(sa);
+    g_free(sb);
+    return res;
+}
+
 static GtkWidget*
 wrap_in_scrolled(GtkWidget* child)
 {
@@ -2944,6 +2977,7 @@ build_checklist_section_tab(GncPluginPageEstatePrivate* priv, int sec)
     GtkCellRenderer* r_tog = gtk_cell_renderer_toggle_new();
     g_signal_connect(r_tog, "toggled", G_CALLBACK(on_sec_toggle), pair);
     GtkTreeViewColumn* c_done = gtk_tree_view_column_new_with_attributes(_("Done"), r_tog, "active", 1, nullptr);
+    gtk_tree_view_column_set_sort_column_id(c_done, 1);
     gtk_tree_view_append_column(tab.tv, c_done);
 
     auto add_txt_col = [&](const char* title, int col_id, int min_w) {
@@ -2952,6 +2986,7 @@ build_checklist_section_tab(GncPluginPageEstatePrivate* priv, int sec)
         GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes(title, r, "text", col_id, nullptr);
         gtk_tree_view_column_set_resizable(c, TRUE);
         gtk_tree_view_column_set_min_width(c, min_w);
+        gtk_tree_view_column_set_sort_column_id(c, col_id);
         gtk_tree_view_append_column(tab.tv, c);
     };
     add_txt_col(_("Checklist Item"), 2, 260);
@@ -3250,14 +3285,18 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_tree_view_set_grid_lines(priv->ben_tv, GTK_TREE_VIEW_GRID_LINES_HORIZONTAL);
     GtkCellRenderer* br_tog = gtk_cell_renderer_toggle_new();
     g_signal_connect(br_tog, "toggled", G_CALLBACK(on_ben_toggle), priv);
-    gtk_tree_view_append_column(priv->ben_tv,
-                                gtk_tree_view_column_new_with_attributes(_("Verified"), br_tog, "active", 1, nullptr));
+    GtkTreeViewColumn* bc_ver = gtk_tree_view_column_new_with_attributes(_("Verified"), br_tog, "active", 1, nullptr);
+    gtk_tree_view_column_set_sort_column_id(bc_ver, 1);
+    gtk_tree_view_append_column(priv->ben_tv, bc_ver);
+    gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->ben_store), 3,
+                                    cmp_currency_or_text, GINT_TO_POINTER(3), nullptr);
     auto add_ben_col = [&](const char* title, int col_id, int w) {
         GtkCellRenderer* r = gtk_cell_renderer_text_new();
         g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, nullptr);
         GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes(title, r, "text", col_id, "foreground", 8, nullptr);
         gtk_tree_view_column_set_resizable(c, TRUE);
         gtk_tree_view_column_set_min_width(c, w);
+        gtk_tree_view_column_set_sort_column_id(c, col_id);
         gtk_tree_view_append_column(priv->ben_tv, c);
     };
     add_ben_col(_("Account / Asset"), 2, 180);
@@ -3358,14 +3397,16 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_tree_view_set_grid_lines(priv->ice_tv, GTK_TREE_VIEW_GRID_LINES_HORIZONTAL);
     GtkCellRenderer* ir_tog = gtk_cell_renderer_toggle_new();
     g_signal_connect(ir_tog, "toggled", G_CALLBACK(on_ice_toggle), priv);
-    gtk_tree_view_append_column(priv->ice_tv,
-                                gtk_tree_view_column_new_with_attributes(_("Verified"), ir_tog, "active", 1, nullptr));
+    GtkTreeViewColumn* ic_ver = gtk_tree_view_column_new_with_attributes(_("Verified"), ir_tog, "active", 1, nullptr);
+    gtk_tree_view_column_set_sort_column_id(ic_ver, 1);
+    gtk_tree_view_append_column(priv->ice_tv, ic_ver);
     auto add_ice_col = [&](const char* title, int col_id, int w) {
         GtkCellRenderer* r = gtk_cell_renderer_text_new();
         g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, nullptr);
         GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes(title, r, "text", col_id, nullptr);
         gtk_tree_view_column_set_resizable(c, TRUE);
         gtk_tree_view_column_set_min_width(c, w);
+        gtk_tree_view_column_set_sort_column_id(c, col_id);
         gtk_tree_view_append_column(priv->ice_tv, c);
     };
     add_ice_col(_("Category"), 2, 100);
@@ -3437,6 +3478,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
         GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes(title, r, "text", col_id, nullptr);
         gtk_tree_view_column_set_resizable(c, TRUE);
         gtk_tree_view_column_set_min_width(c, w);
+        gtk_tree_view_column_set_sort_column_id(c, col_id);
         gtk_tree_view_append_column(priv->contact_tv, c);
     };
     add_ct_col(_("Fiduciary / Role"), 1, 200);
