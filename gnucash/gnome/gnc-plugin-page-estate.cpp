@@ -29,12 +29,14 @@
 #include <gtk/gtk.h>
 #include <glib/gi18n.h>
 #include <glib/gstdio.h>
+#include <libsoup/soup.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -45,6 +47,7 @@
 #include "gnc-icons.h"
 #include "gnc-plugin-page-estate.h"
 #include "gnc-plugin-retirement.h"
+#include "gnc-retirement-engine.hpp"
 #include "gnc-session.h"
 #include "gnc-state.h"
 #include "gnc-ui-util.h"
@@ -194,6 +197,20 @@ struct GncPluginPageEstatePrivate
     GtkSpinButton* spin_ht_growth = nullptr;
     GtkComboBoxText* combo_ht_strategy = nullptr;
     GtkTextView* tv_ht_report = nullptr;
+
+    // Tab 8: Ask Estate AI
+    GtkComboBoxText* combo_ai_provider = nullptr;
+    GtkEntry* entry_ai_endpoint = nullptr;
+    GtkComboBoxText* combo_ai_model = nullptr;
+    GtkEntry* entry_ai_model = nullptr;
+    GtkEntry* entry_ai_key = nullptr;
+    GtkEntry* entry_ai_question = nullptr;
+    GtkTextView* tv_ai_system = nullptr;
+    GtkTextView* tv_ai_response = nullptr;
+    GtkLabel* lbl_ai_status = nullptr;
+    GtkWidget* btn_ai_stop = nullptr;
+    SoupSession* soup_session = nullptr;
+    GCancellable* ai_cancel = nullptr;
 
     // Data
     std::vector<EstateChecklistItem> items;
@@ -2167,6 +2184,577 @@ on_reset_defaults_clicked(GtkButton*, gpointer user_data)
     gtk_widget_destroy(dlg);
 }
 
+static const char*
+estate_ai_default_system_prompt()
+{
+    return
+        "You are an analytical personal estate-continuity and tax-planning advisor "
+        "(note: remind the user to confirm state-specific legal documents with a licensed "
+        "attorney in their state).\n\n"
+        "OPERATING RULES:\n"
+        "1. Show Your Math: When analyzing SECURE Act 10-year inherited IRA taxes, Roth "
+        "conversion savings, or estate thresholds, show the step-by-step numbers.\n"
+        "2. State Specificity: Tailor probate, homestead, TBE, Lady Bird / TOD deed, POA, "
+        "and state estate/inheritance tax guidance to the user's selected state.\n"
+        "3. Prioritize Gaps: Highlight missing legal documents, stale (>12 month) or "
+        "unverified beneficiary audits, unlinked accounts, and upcoming triggers first.\n"
+        "4. Privacy: Do not ask for raw account numbers, passwords, or SSNs.\n"
+        "5. Structure every response into: Gaps & Risks, Step-by-Step Analysis, "
+        "Actionable Next Steps, and Questions for Your Attorney/CPA.";
+}
+
+static std::string
+shared_ai_config_path()
+{
+    gchar* p = gnc_build_userdata_path("retirement-ai.conf");
+    std::string out = p ? p : "";
+    g_free(p);
+    return out;
+}
+
+static void
+populate_estate_ai_models(GncPluginPageEstatePrivate* priv,
+                          const std::vector<std::string>& models,
+                          const char* preferred = nullptr)
+{
+    if (!priv->combo_ai_model) return;
+    std::string cur = priv->entry_ai_model ? gtk_entry_get_text(priv->entry_ai_model) : "";
+    gtk_combo_box_text_remove_all(priv->combo_ai_model);
+    for (const auto& m : models)
+        gtk_combo_box_text_append_text(priv->combo_ai_model, m.c_str());
+    if (preferred && preferred[0] != '\0')
+        gtk_entry_set_text(priv->entry_ai_model, preferred);
+    else if (!cur.empty() && std::find(models.begin(), models.end(), cur) != models.end())
+        gtk_entry_set_text(priv->entry_ai_model, cur.c_str());
+    else if (!models.empty())
+        gtk_entry_set_text(priv->entry_ai_model, models.front().c_str());
+}
+
+static void
+apply_estate_ai_provider_defaults(GncPluginPageEstatePrivate* priv, int idx)
+{
+    if (idx == 0)
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/chat");
+        populate_estate_ai_models(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
+    }
+    else if (idx == 1)
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "https://generativelanguage.googleapis.com/v1beta");
+        populate_estate_ai_models(priv, {"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"}, "gemini-2.5-flash");
+    }
+    else
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "https://api.openai.com/v1/chat/completions");
+        populate_estate_ai_models(priv, {"gpt-4o-mini", "gpt-4o", "o3-mini"}, "gpt-4o-mini");
+    }
+}
+
+static void
+load_shared_ai_config(GncPluginPageEstatePrivate* priv)
+{
+    if (!priv || !priv->combo_ai_provider) return;
+    std::string cfg = shared_ai_config_path();
+    GKeyFile* kf = g_key_file_new();
+    bool ok = !cfg.empty() && g_key_file_load_from_file(kf, cfg.c_str(), G_KEY_FILE_NONE, nullptr);
+
+    priv->updating_ui = true;
+    int p_idx = 0;
+    if (ok && g_key_file_has_key(kf, "RetirementAI", "ai_provider", nullptr))
+        p_idx = std::clamp(g_key_file_get_integer(kf, "RetirementAI", "ai_provider", nullptr), 0, 2);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_provider), p_idx);
+    apply_estate_ai_provider_defaults(priv, p_idx);
+
+    auto load_s = [&](const char* k, GtkEntry* e) {
+        if (!ok || !e) return;
+        if (gchar* v = g_key_file_get_string(kf, "RetirementAI", k, nullptr))
+        {
+            if (v[0] != '\0') gtk_entry_set_text(e, v);
+            g_free(v);
+        }
+    };
+    load_s("ai_endpoint", priv->entry_ai_endpoint);
+    load_s("ai_model", priv->entry_ai_model);
+    load_s("ai_api_key", priv->entry_ai_key);
+    priv->updating_ui = false;
+    g_key_file_free(kf);
+}
+
+static void
+save_shared_ai_config(GncPluginPageEstatePrivate* priv)
+{
+    if (!priv || !priv->root_widget || priv->updating_ui || !priv->combo_ai_provider)
+        return;
+    std::string cfg = shared_ai_config_path();
+    if (cfg.empty()) return;
+    GKeyFile* kf = g_key_file_new();
+    g_key_file_load_from_file(kf, cfg.c_str(), G_KEY_FILE_KEEP_COMMENTS, nullptr);
+    int p_idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
+    g_key_file_set_integer(kf, "RetirementAI", "ai_provider", p_idx);
+    auto save_s = [&](const char* k, const char* prefix, GtkEntry* e) {
+        if (!e) return;
+        const char* v = gtk_entry_get_text(e);
+        g_key_file_set_string(kf, "RetirementAI", k, v ? v : "");
+        std::string pk = std::string(prefix) + "_" + std::to_string(p_idx);
+        g_key_file_set_string(kf, "RetirementAI", pk.c_str(), v ? v : "");
+    };
+    save_s("ai_endpoint", "ai_endpoint", priv->entry_ai_endpoint);
+    save_s("ai_model", "ai_model", priv->entry_ai_model);
+    save_s("ai_api_key", "ai_api_key", priv->entry_ai_key);
+    g_key_file_save_to_file(kf, cfg.c_str(), nullptr);
+    g_chmod(cfg.c_str(), 0600);
+    g_key_file_free(kf);
+}
+
+static std::string
+build_estate_ai_summary(GncPluginPageEstatePrivate* priv)
+{
+    std::ostringstream os;
+    std::string st = selected_state_name(priv);
+    os << "=== ANONYMIZED ESTATE & CONTINUITY SUMMARY ===\n";
+    os << "State: " << st << " (" << gtk_entry_get_text(priv->entry_jurisdiction) << ")\n";
+    os << "State Guidance: " << state_estate_guidance(st) << "\n";
+    os << "Scenarios: " << gtk_entry_get_text(priv->entry_scenarios) << "\n";
+    os << "Last Audit: " << gtk_entry_get_text(priv->entry_last_audit)
+       << " | Next Audit: " << gtk_entry_get_text(priv->entry_next_audit) << "\n\n";
+
+    os << "Checklist Items:\n";
+    for (const auto& it : priv->items)
+    {
+        const char* sname = (it.section == SEC_LEGAL) ? "Legal"
+                          : (it.section == SEC_TAX)   ? "Tax"
+                                                      : "ICE";
+        os << "- [" << (it.done ? "x" : " ") << "] [" << sname << "] " << it.title
+           << " | Status: " << it.status;
+        if (!it.due_trigger.empty()) os << " | Trigger: " << it.due_trigger;
+        os << "\n";
+    }
+
+    os << "\nBeneficiary & Asset Audit (no account numbers):\n";
+    for (const auto& b : priv->ben_rows)
+    {
+        bool stale = !b.verified || is_date_stale(b.last_verified_date);
+        os << "- [" << (b.verified ? "x" : " ") << "] " << b.account_name
+           << " | Value: " << b.approx_value
+           << " | Primary: " << b.primary_beneficiary
+           << " | Contingent: " << b.contingent_structure
+           << " | Trigger: " << b.recheck_trigger
+           << " | Audit: " << (b.verified ? (stale ? "Stale >12m" : "Current") : "Pending") << "\n";
+    }
+
+    if (priv->spin_ht_trad)
+    {
+        os << "\nSECURE Act 10-Yr Inherited Account Inputs:\n"
+           << "- Tax-Deferred: " << fmt_money_str(gtk_spin_button_get_value(priv->spin_ht_trad))
+           << " | Roth: " << fmt_money_str(gtk_spin_button_get_value(priv->spin_ht_roth))
+           << " | Heirs: " << gtk_spin_button_get_value_as_int(priv->spin_ht_heirs)
+           << " | Heir Rate: " << gtk_spin_button_get_value(priv->spin_ht_rate) << "%\n";
+    }
+    return os.str();
+}
+
+static void
+set_estate_ai_response(GncPluginPageEstatePrivate* priv, const std::string& txt)
+{
+    if (priv->tv_ai_response)
+        gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_response), txt.c_str(), -1);
+}
+
+static void
+append_estate_ai_response(GncPluginPageEstatePrivate* priv, const std::string& tok)
+{
+    if (!priv->tv_ai_response || tok.empty()) return;
+    GtkTextBuffer* buf = gtk_text_view_get_buffer(priv->tv_ai_response);
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(buf, &end);
+    gtk_text_buffer_insert(buf, &end, tok.c_str(), static_cast<gint>(tok.size()));
+}
+
+static void
+ensure_estate_soup(GncPluginPageEstatePrivate* priv)
+{
+    if (!priv->soup_session)
+    {
+        priv->soup_session = soup_session_new();
+        soup_session_set_timeout(priv->soup_session, 600);
+        soup_session_set_idle_timeout(priv->soup_session, 600);
+    }
+}
+
+struct EstateAiCtx
+{
+    GncPluginPageEstatePrivate* priv = nullptr;
+    gnc::retirement::AiProvider provider = gnc::retirement::AiProvider::Ollama;
+    GInputStream* stream = nullptr;
+    std::string line_buf;
+    std::string full_reply;
+    bool cleared_thinking = false;
+
+    ~EstateAiCtx()
+    {
+        if (stream) g_object_unref(stream);
+    }
+};
+
+static void
+finish_estate_ai_stream(std::unique_ptr<EstateAiCtx> ctx, const char* err_msg = nullptr)
+{
+    auto* priv = ctx->priv;
+    if (!priv || !priv->root_widget) return;
+    if (priv->btn_ai_stop) gtk_widget_set_sensitive(priv->btn_ai_stop, FALSE);
+    if (err_msg)
+    {
+        if (!ctx->cleared_thinking)
+            set_estate_ai_response(priv, err_msg);
+        else
+            append_estate_ai_response(priv, std::string("\n\n[") + err_msg + "]");
+        if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, err_msg);
+        return;
+    }
+    if (!ctx->line_buf.empty())
+    {
+        std::string tok = gnc::retirement::extract_ai_stream_line(ctx->provider, ctx->line_buf);
+        if (!tok.empty())
+        {
+            if (!ctx->cleared_thinking) { set_estate_ai_response(priv, ""); ctx->cleared_thinking = true; }
+            ctx->full_reply += tok;
+            append_estate_ai_response(priv, tok);
+        }
+    }
+    if (ctx->full_reply.empty())
+        set_estate_ai_response(priv, "No response tokens received from provider.");
+    if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Done."));
+}
+
+static void
+on_estate_ai_stream_read(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<EstateAiCtx> ctx(static_cast<EstateAiCtx*>(user_data));
+    auto* priv = ctx->priv;
+    GError* err = nullptr;
+    GBytes* bytes = g_input_stream_read_bytes_finish(G_INPUT_STREAM(source), res, &err);
+    if (!priv || !priv->root_widget)
+    {
+        if (bytes) g_bytes_unref(bytes);
+        if (err) g_error_free(err);
+        return;
+    }
+    if (!bytes)
+    {
+        std::string msg = std::string("Stream failed: ") + (err ? err->message : "Unknown error");
+        if (err) g_error_free(err);
+        finish_estate_ai_stream(std::move(ctx), msg.c_str());
+        return;
+    }
+    gsize len = 0;
+    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
+    if (len == 0)
+    {
+        g_bytes_unref(bytes);
+        finish_estate_ai_stream(std::move(ctx));
+        return;
+    }
+    ctx->line_buf.append(raw, len);
+    g_bytes_unref(bytes);
+
+    size_t nl = 0;
+    while ((nl = ctx->line_buf.find('\n')) != std::string::npos)
+    {
+        std::string line = ctx->line_buf.substr(0, nl);
+        ctx->line_buf.erase(0, nl + 1);
+        std::string tok = gnc::retirement::extract_ai_stream_line(ctx->provider, line);
+        if (!tok.empty())
+        {
+            if (!ctx->cleared_thinking)
+            {
+                set_estate_ai_response(priv, "");
+                ctx->cleared_thinking = true;
+                if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Streaming response..."));
+            }
+            ctx->full_reply += tok;
+            append_estate_ai_response(priv, tok);
+        }
+    }
+    GInputStream* stream = ctx->stream;
+    g_input_stream_read_bytes_async(stream, 4096, G_PRIORITY_DEFAULT,
+                                    priv->ai_cancel, on_estate_ai_stream_read, ctx.release());
+}
+
+static void
+on_estate_ai_send_opened(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<EstateAiCtx> ctx(static_cast<EstateAiCtx*>(user_data));
+    auto* priv = ctx->priv;
+    GError* err = nullptr;
+    GInputStream* in_stream = soup_session_send_finish(SOUP_SESSION(source), res, &err);
+    if (!priv || !priv->root_widget)
+    {
+        if (in_stream) g_object_unref(in_stream);
+        if (err) g_error_free(err);
+        return;
+    }
+    if (!in_stream)
+    {
+        std::string msg = std::string("Request failed: ") + (err ? err->message : "Unknown network error");
+        if (err) g_error_free(err);
+        finish_estate_ai_stream(std::move(ctx), msg.c_str());
+        return;
+    }
+    SoupMessage* msg = soup_session_get_async_result_message(SOUP_SESSION(source), res);
+    guint status = msg ? soup_message_get_status(msg) : 0;
+    if (status == 404 && ctx->provider == gnc::retirement::AiProvider::Ollama)
+    {
+        g_object_unref(in_stream);
+        finish_estate_ai_stream(std::move(ctx), "Model not found on Ollama (HTTP 404). Click 'Refresh Models'.");
+        return;
+    }
+    ctx->stream = in_stream;
+    g_input_stream_read_bytes_async(in_stream, 4096, G_PRIORITY_DEFAULT,
+                                    priv->ai_cancel, on_estate_ai_stream_read, ctx.release());
+}
+
+static void
+on_estate_ai_gemini_finished(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<EstateAiCtx> ctx(static_cast<EstateAiCtx*>(user_data));
+    auto* priv = ctx->priv;
+    GError* err = nullptr;
+    GBytes* bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), res, &err);
+    if (!priv || !priv->root_widget)
+    {
+        if (bytes) g_bytes_unref(bytes);
+        if (err) g_error_free(err);
+        return;
+    }
+    if (priv->btn_ai_stop) gtk_widget_set_sensitive(priv->btn_ai_stop, FALSE);
+    if (!bytes)
+    {
+        std::string msg = std::string("Request failed: ") + (err ? err->message : "Unknown network error");
+        if (err) g_error_free(err);
+        set_estate_ai_response(priv, msg);
+        if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, msg.c_str());
+        return;
+    }
+    gsize len = 0;
+    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
+    std::string resp_str(raw ? raw : "", len);
+    g_bytes_unref(bytes);
+    std::string reply = gnc::retirement::extract_ai_response_text(ctx->provider, resp_str);
+    set_estate_ai_response(priv, reply);
+    if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Done."));
+}
+
+static void
+on_estate_ai_models_finished(GObject* source, GAsyncResult* res, gpointer user_data)
+{
+    std::unique_ptr<EstateAiCtx> ctx(static_cast<EstateAiCtx*>(user_data));
+    auto* priv = ctx->priv;
+    GError* err = nullptr;
+    GBytes* bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), res, &err);
+    if (!priv || !priv->root_widget)
+    {
+        if (bytes) g_bytes_unref(bytes);
+        if (err) g_error_free(err);
+        return;
+    }
+    if (!bytes)
+    {
+        std::string msg = std::string("Model list failed: ") + (err ? err->message : "Unknown error");
+        if (err) g_error_free(err);
+        if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, msg.c_str());
+        return;
+    }
+    gsize len = 0;
+    const char* raw = static_cast<const char*>(g_bytes_get_data(bytes, &len));
+    std::string resp_str(raw ? raw : "", len);
+    g_bytes_unref(bytes);
+    auto models = gnc::retirement::extract_ai_models_list(ctx->provider, resp_str);
+    if (models.empty())
+    {
+        if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("No models returned by provider."));
+        return;
+    }
+    populate_estate_ai_models(priv, models);
+    save_shared_ai_config(priv);
+    if (priv->lbl_ai_status)
+    {
+        std::string st = "Loaded " + std::to_string(models.size()) + " models.";
+        gtk_label_set_text(priv->lbl_ai_status, st.c_str());
+    }
+}
+
+static void
+on_estate_ai_refresh_models(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    ensure_estate_soup(priv);
+    int p_idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
+    auto provider = static_cast<gnc::retirement::AiProvider>(p_idx);
+    std::string endpoint = gtk_entry_get_text(priv->entry_ai_endpoint);
+    std::string api_key = gtk_entry_get_text(priv->entry_ai_key);
+    if (api_key.empty())
+    {
+        const char* env_var = (provider == gnc::retirement::AiProvider::Gemini) ? g_getenv("GEMINI_API_KEY") : g_getenv("OPENAI_API_KEY");
+        if (env_var) api_key = env_var;
+    }
+    std::string url;
+    if (provider == gnc::retirement::AiProvider::Ollama)
+    {
+        size_t pos = endpoint.find("/api/");
+        url = (pos != std::string::npos ? endpoint.substr(0, pos) : endpoint) + "/api/tags";
+    }
+    else if (provider == gnc::retirement::AiProvider::Gemini)
+    {
+        if (api_key.empty()) { if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Enter Gemini API key first.")); return; }
+        url = "https://generativelanguage.googleapis.com/v1beta/models";
+    }
+    else
+    {
+        size_t pos = endpoint.find("/chat/completions");
+        url = (pos != std::string::npos ? endpoint.substr(0, pos) : endpoint) + "/models";
+    }
+    SoupMessage* msg = soup_message_new("GET", url.c_str());
+    if (!msg) return;
+    if (provider == gnc::retirement::AiProvider::Gemini)
+        soup_message_headers_append(soup_message_get_request_headers(msg), "x-goog-api-key", api_key.c_str());
+    else if (provider == gnc::retirement::AiProvider::OpenAICompatible && !api_key.empty())
+        soup_message_headers_append(soup_message_get_request_headers(msg), "Authorization", ("Bearer " + api_key).c_str());
+    if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Fetching models..."));
+    auto* ctx = new EstateAiCtx{priv, provider};
+    soup_session_send_and_read_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, nullptr, on_estate_ai_models_finished, ctx);
+    g_object_unref(msg);
+}
+
+static void
+on_estate_ai_provider_changed(GtkComboBox*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    if (priv->updating_ui) return;
+    int idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
+    priv->updating_ui = true;
+    apply_estate_ai_provider_defaults(priv, idx);
+    priv->updating_ui = false;
+    save_shared_ai_config(priv);
+}
+
+static void
+on_estate_ai_setting_changed(GtkWidget*, gpointer user_data)
+{
+    save_shared_ai_config(static_cast<GncPluginPageEstatePrivate*>(user_data));
+}
+
+static void
+on_estate_ai_stop(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    if (priv->ai_cancel) g_cancellable_cancel(priv->ai_cancel);
+}
+
+static void
+send_estate_ai_prompt(GncPluginPageEstatePrivate* priv, const std::string& question)
+{
+    save_shared_ai_config(priv);
+    ensure_estate_soup(priv);
+    if (priv->ai_cancel) { g_cancellable_cancel(priv->ai_cancel); g_object_unref(priv->ai_cancel); }
+    priv->ai_cancel = g_cancellable_new();
+
+    int p_idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
+    auto provider = static_cast<gnc::retirement::AiProvider>(p_idx);
+    std::string endpoint = gtk_entry_get_text(priv->entry_ai_endpoint);
+    std::string model = gtk_entry_get_text(priv->entry_ai_model);
+    std::string api_key = gtk_entry_get_text(priv->entry_ai_key);
+    if (api_key.empty())
+    {
+        const char* env_var = (provider == gnc::retirement::AiProvider::Gemini) ? g_getenv("GEMINI_API_KEY") : g_getenv("OPENAI_API_KEY");
+        if (env_var) api_key = env_var;
+    }
+    if (provider != gnc::retirement::AiProvider::Ollama && api_key.empty())
+    {
+        set_estate_ai_response(priv, "Please enter an API key (or set GEMINI_API_KEY / OPENAI_API_KEY), or switch Provider to Local Ollama.");
+        return;
+    }
+
+    std::string url = endpoint;
+    if (provider == gnc::retirement::AiProvider::Ollama)
+    {
+        size_t gp = url.find("/api/generate");
+        if (gp != std::string::npos) url.replace(gp, 13, "/api/chat");
+    }
+    else if (provider == gnc::retirement::AiProvider::Gemini && endpoint.find(":generateContent") == std::string::npos)
+    {
+        if (!url.empty() && url.back() == '/') url.pop_back();
+        url += "/models/" + model + ":generateContent";
+    }
+
+    std::string sys_prompt = read_text_view(priv->tv_ai_system);
+    if (sys_prompt.empty()) sys_prompt = estate_ai_default_system_prompt();
+    std::string full_prompt = build_estate_ai_summary(priv) + "\nQuestion: " + question;
+    const bool use_stream = (provider != gnc::retirement::AiProvider::Gemini);
+    std::string body = gnc::retirement::build_ai_request_json(provider, model, sys_prompt, full_prompt, use_stream, 2048, 1200);
+
+    SoupMessage* msg = soup_message_new("POST", url.c_str());
+    if (!msg) { set_estate_ai_response(priv, "Invalid endpoint URL: " + url); return; }
+    if (provider == gnc::retirement::AiProvider::Gemini)
+        soup_message_headers_append(soup_message_get_request_headers(msg), "x-goog-api-key", api_key.c_str());
+    else if (provider == gnc::retirement::AiProvider::OpenAICompatible && !api_key.empty())
+        soup_message_headers_append(soup_message_get_request_headers(msg), "Authorization", ("Bearer " + api_key).c_str());
+
+    GBytes* req_bytes = g_bytes_new(body.data(), body.size());
+    soup_message_set_request_body_from_bytes(msg, "application/json", req_bytes);
+    g_bytes_unref(req_bytes);
+
+    if (priv->btn_ai_stop) gtk_widget_set_sensitive(priv->btn_ai_stop, TRUE);
+    if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, use_stream ? _("Streaming response...") : _("Contacting Gemini..."));
+    set_estate_ai_response(priv, use_stream ? "Thinking (streaming tokens)..." : "Thinking...");
+
+    auto* ctx = new EstateAiCtx{priv, provider};
+    if (use_stream)
+        soup_session_send_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, priv->ai_cancel, on_estate_ai_send_opened, ctx);
+    else
+        soup_session_send_and_read_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, priv->ai_cancel, on_estate_ai_gemini_finished, ctx);
+    g_object_unref(msg);
+}
+
+static void
+on_estate_ai_audit_gaps(GtkButton*, gpointer user_data)
+{
+    send_estate_ai_prompt(static_cast<GncPluginPageEstatePrivate*>(user_data),
+        "Audit my estate readiness gaps: identify missing legal documents, stale or pending beneficiary audits, "
+        "and upcoming mandatory re-check triggers in chronological order.");
+}
+
+static void
+on_estate_ai_state_risks(GtkButton*, gpointer user_data)
+{
+    send_estate_ai_prompt(static_cast<GncPluginPageEstatePrivate*>(user_data),
+        "Review my state-specific probate, homestead/TBE, Lady Bird vs. Revocable Trust, POA, and state estate/inheritance tax risks.");
+}
+
+static void
+on_estate_ai_heir_tax(GtkButton*, gpointer user_data)
+{
+    send_estate_ai_prompt(static_cast<GncPluginPageEstatePrivate*>(user_data),
+        "Analyze my SECURE Act 10-year inherited IRA vs. Roth numbers and HSA/Social Security continuity rules. Show the math.");
+}
+
+static void
+on_estate_ai_ask(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    std::string q = priv->entry_ai_question ? gtk_entry_get_text(priv->entry_ai_question) : "";
+    if (q.empty()) q = "What are my top 3 highest-priority estate continuity action items right now?";
+    send_estate_ai_prompt(priv, q);
+}
+
+static void
+on_estate_ai_copy(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    std::string s = build_estate_ai_summary(priv);
+    gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), s.c_str(), -1);
+    if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Copied anonymized estate summary to clipboard."));
+}
+
 static GtkWidget*
 wrap_in_scrolled(GtkWidget* child)
 {
@@ -2778,10 +3366,105 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_box_pack_start(GTK_BOX(tab_ht), ht_sw, TRUE, TRUE, 0);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(tab_ht), gtk_label_new(_("7. Heir 10-Yr Tax")));
 
+    // Tab 8: Ask Estate AI
+    GtkWidget* tab_ai = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_set_border_width(GTK_CONTAINER(tab_ai), 8);
+
+    GtkWidget* ai_cfg = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(ai_cfg), 4);
+    gtk_grid_set_column_spacing(GTK_GRID(ai_cfg), 8);
+    priv->combo_ai_provider = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(priv->combo_ai_provider, _("Local Ollama (Offline)"));
+    gtk_combo_box_text_append_text(priv->combo_ai_provider, _("Google Gemini"));
+    gtk_combo_box_text_append_text(priv->combo_ai_provider, _("OpenAI-Compatible"));
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_provider), 0);
+    g_signal_connect(priv->combo_ai_provider, "changed", G_CALLBACK(on_estate_ai_provider_changed), priv);
+
+    priv->combo_ai_model = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new_with_entry());
+    priv->entry_ai_model = GTK_ENTRY(gtk_bin_get_child(GTK_BIN(priv->combo_ai_model)));
+    populate_estate_ai_models(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
+    g_signal_connect(priv->entry_ai_model, "changed", G_CALLBACK(on_estate_ai_setting_changed), priv);
+    GtkWidget* btn_ai_ref = gtk_button_new_with_label(_("Refresh Models"));
+    g_signal_connect(btn_ai_ref, "clicked", G_CALLBACK(on_estate_ai_refresh_models), priv);
+
+    priv->entry_ai_endpoint = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/chat");
+    gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ai_endpoint), TRUE);
+    g_signal_connect(priv->entry_ai_endpoint, "changed", G_CALLBACK(on_estate_ai_setting_changed), priv);
+
+    priv->entry_ai_key = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_visibility(priv->entry_ai_key, FALSE);
+    gtk_entry_set_placeholder_text(priv->entry_ai_key, _("Shared with Retirement Planner; or set GEMINI_API_KEY / OPENAI_API_KEY"));
+    g_signal_connect(priv->entry_ai_key, "changed", G_CALLBACK(on_estate_ai_setting_changed), priv);
+
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Provider")), 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->combo_ai_provider), 1, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Model")), 2, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->combo_ai_model), 3, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), btn_ai_ref, 4, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Endpoint")), 0, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_endpoint), 1, 1, 4, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("API Key")), 0, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->entry_ai_key), 1, 2, 4, 1);
+    gtk_box_pack_start(GTK_BOX(tab_ai), ai_cfg, FALSE, FALSE, 0);
+
+    GtkWidget* sys_exp = gtk_expander_new(_("Estate AI System Prompt (Editable)"));
+    gtk_expander_set_expanded(GTK_EXPANDER(sys_exp), FALSE);
+    priv->tv_ai_system = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_wrap_mode(priv->tv_ai_system, GTK_WRAP_WORD_CHAR);
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system), estate_ai_default_system_prompt(), -1);
+    GtkWidget* sys_sw = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(sys_sw), 90);
+    gtk_container_add(GTK_CONTAINER(sys_sw), GTK_WIDGET(priv->tv_ai_system));
+    gtk_container_add(GTK_CONTAINER(sys_exp), sys_sw);
+    gtk_box_pack_start(GTK_BOX(tab_ai), sys_exp, FALSE, FALSE, 0);
+
+    GtkWidget* ai_qbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    priv->entry_ai_question = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(priv->entry_ai_question, _("Ask about your estate checklist, probate, beneficiaries, or 10-yr inherited IRA tax..."));
+    g_signal_connect(priv->entry_ai_question, "activate", G_CALLBACK(on_estate_ai_ask), priv);
+    GtkWidget* b_ask = gtk_button_new_with_label(_("Ask"));
+    priv->btn_ai_stop = gtk_button_new_with_label(_("Stop"));
+    gtk_widget_set_sensitive(priv->btn_ai_stop, FALSE);
+    GtkWidget* b_gaps = gtk_button_new_with_label(_("Audit Estate Gaps"));
+    GtkWidget* b_st   = gtk_button_new_with_label(_("State & Probate Risks"));
+    GtkWidget* b_ht   = gtk_button_new_with_label(_("Heir 10-Yr Tax"));
+    GtkWidget* b_cp   = gtk_button_new_with_label(_("Copy Summary"));
+    g_signal_connect(b_ask, "clicked", G_CALLBACK(on_estate_ai_ask), priv);
+    g_signal_connect(priv->btn_ai_stop, "clicked", G_CALLBACK(on_estate_ai_stop), priv);
+    g_signal_connect(b_gaps, "clicked", G_CALLBACK(on_estate_ai_audit_gaps), priv);
+    g_signal_connect(b_st, "clicked", G_CALLBACK(on_estate_ai_state_risks), priv);
+    g_signal_connect(b_ht, "clicked", G_CALLBACK(on_estate_ai_heir_tax), priv);
+    g_signal_connect(b_cp, "clicked", G_CALLBACK(on_estate_ai_copy), priv);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), GTK_WIDGET(priv->entry_ai_question), TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), b_ask, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), priv->btn_ai_stop, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), b_gaps, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), b_st, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), b_ht, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), b_cp, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tab_ai), ai_qbar, FALSE, FALSE, 0);
+
+    priv->lbl_ai_status = GTK_LABEL(gtk_label_new(_("Shares your saved AI settings from Ask Owl AI. Privacy: account numbers, safe locations & contacts are excluded.")));
+    gtk_label_set_xalign(priv->lbl_ai_status, 0.0f);
+    gtk_box_pack_start(GTK_BOX(tab_ai), GTK_WIDGET(priv->lbl_ai_status), FALSE, FALSE, 0);
+
+    priv->tv_ai_response = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(priv->tv_ai_response, FALSE);
+    gtk_text_view_set_wrap_mode(priv->tv_ai_response, GTK_WRAP_WORD_CHAR);
+    GtkWidget* ai_sw = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ai_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ai_sw), 160);
+    gtk_container_add(GTK_CONTAINER(ai_sw), GTK_WIDGET(priv->tv_ai_response));
+    gtk_box_pack_start(GTK_BOX(tab_ai), ai_sw, TRUE, TRUE, 0);
+
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(tab_ai), gtk_label_new(_("8. Ask Estate AI")));
+
     gtk_box_pack_start(GTK_BOX(root), nb, TRUE, TRUE, 0);
     gtk_widget_show_all(root);
 
     load_estate_state(priv);
+    load_shared_ai_config(priv);
     return root;
 }
 
@@ -2807,6 +3490,17 @@ gnc_plugin_page_estate_destroy_widget(GncPluginPage* plugin_page)
     if (priv->root_widget)
     {
         save_estate_state(priv, true);
+        if (priv->ai_cancel)
+        {
+            g_cancellable_cancel(priv->ai_cancel);
+            g_object_unref(priv->ai_cancel);
+            priv->ai_cancel = nullptr;
+        }
+        if (priv->soup_session)
+        {
+            g_object_unref(priv->soup_session);
+            priv->soup_session = nullptr;
+        }
         for (int s = 0; s < 3; ++s)
         {
             if (priv->sec_tabs[s].store)
