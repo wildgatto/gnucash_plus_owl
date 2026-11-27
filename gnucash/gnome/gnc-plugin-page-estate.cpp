@@ -109,12 +109,15 @@ struct SectionTabWidgets
 struct GncPluginPageEstatePrivate
 {
     GtkWidget* root_widget = nullptr;
+    GtkLabel* lbl_header = nullptr;
     GtkLabel* lbl_status = nullptr;
+    GtkLabel* lbl_state_note = nullptr;
 
     // Metadata
     GtkEntry* entry_prepared_for = nullptr;
     GtkEntry* entry_scenarios = nullptr;
     GtkEntry* entry_heirs = nullptr;
+    GtkComboBoxText* combo_state = nullptr;
     GtkEntry* entry_jurisdiction = nullptr;
     GtkEntry* entry_attorney = nullptr;
     GtkEntry* entry_safe_location = nullptr;
@@ -450,6 +453,69 @@ populate_default_florida_checklist(GncPluginPageEstatePrivate* priv)
     priv->ice_rows.push_back({false, "Financial", "SSA.gov / Login.gov", "Greg & Tammy Benefit Accounts", "Password Manager + Safe Backup", "Includes Survivor SS Playbook"});
 }
 
+static const char* const US_STATES[] = {
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California",
+    "Colorado", "Connecticut", "Delaware", "District of Columbia", "Florida",
+    "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana",
+    "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine",
+    "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi",
+    "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire",
+    "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota",
+    "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island",
+    "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah",
+    "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin",
+    "Wyoming"
+};
+static constexpr int DEFAULT_STATE_INDEX = 9; // Florida
+
+static std::string
+selected_state_name(GncPluginPageEstatePrivate* priv)
+{
+    if (priv && priv->combo_state)
+    {
+        gchar* s = gtk_combo_box_text_get_active_text(priv->combo_state);
+        if (s)
+        {
+            std::string out(s);
+            g_free(s);
+            if (!out.empty()) return out;
+        }
+    }
+    return "Florida";
+}
+
+static std::string
+state_estate_guidance(const std::string& st)
+{
+    if (st == "Florida")
+        return "Florida Notes: No state estate or inheritance tax. Strong Homestead protections, Tenants by the Entirety (TBE), Lady Bird (Enhanced Life Estate) deeds, and post-2011 non-springing Durable POA with separately initialed superpowers.";
+    if (st == "Massachusetts" || st == "Oregon" || st == "Washington" || st == "New York" ||
+        st == "Illinois" || st == "Connecticut" || st == "Minnesota" || st == "Vermont" ||
+        st == "Rhode Island" || st == "Maine" || st == "Hawaii" || st == "District of Columbia")
+        return st + " Notes: Has a STATE ESTATE TAX (with thresholds often much lower than the federal exemption). Review credit-shelter / bypass trust planning and gifting with a " + st + " estate attorney.";
+    if (st == "Maryland")
+        return "Maryland Notes: Only state with BOTH a state estate tax AND a state inheritance tax (exempts spouses/children/lineal descendants, taxes collateral heirs). Consider revocable trust & beneficiary review.";
+    if (st == "Pennsylvania" || st == "New Jersey" || st == "Kentucky" || st == "Nebraska" || st == "Iowa")
+        return st + " Notes: Has a STATE INHERITANCE TAX depending on heir relationship (spouses usually exempt; siblings/nieces/nephews/non-relatives often taxed). Verify beneficiary classes.";
+    if (st == "Texas" || st == "California" || st == "Arizona" || st == "Nevada" ||
+        st == "New Mexico" || st == "Idaho" || st == "Louisiana" || st == "Wisconsin")
+        return st + " Notes: Community Property state (no state estate/inheritance tax, except check state-specific probate/TOD rules; California probate fees are high so Revocable Living Trust is strongly favored).";
+    return st + " Notes: No state estate or inheritance tax. Verify state-specific POA statutory form, Transfer-on-Death (TOD) deed availability, and probate thresholds with a local attorney.";
+}
+
+static void
+update_state_labels(GncPluginPageEstatePrivate* priv)
+{
+    std::string st = selected_state_name(priv);
+    if (priv->lbl_header)
+    {
+        std::string mk = "<b>" + html_escape(st) + " Estate &amp; Continuity Tracker</b>";
+        gtk_label_set_markup(priv->lbl_header, mk.c_str());
+    }
+    if (priv->lbl_state_note)
+        gtk_label_set_text(priv->lbl_state_note, state_estate_guidance(st).c_str());
+}
+
 static void
 write_estate_to_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
 {
@@ -462,6 +528,7 @@ write_estate_to_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
     set_entry("prepared_for", priv->entry_prepared_for);
     set_entry("scenarios", priv->entry_scenarios);
     set_entry("heirs", priv->entry_heirs);
+    g_key_file_set_string(kf, ESTATE_GROUP_META, "state", selected_state_name(priv).c_str());
     set_entry("jurisdiction", priv->entry_jurisdiction);
     set_entry("attorney", priv->entry_attorney);
     set_entry("safe_location", priv->entry_safe_location);
@@ -574,8 +641,18 @@ load_estate_from_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
         gtk_entry_set_text(priv->entry_scenarios, get_str(ESTATE_GROUP_META, "scenarios", "Scenario A (Jan 2027) & Scenario B (Jan 2028)").c_str());
     if (priv->entry_heirs)
         gtk_entry_set_text(priv->entry_heirs, get_str(ESTATE_GROUP_META, "heirs", "Hannah (turns 26 Apr 2027) & Peyton (turns 21 Jan 2027) — 50% / 50% equal split, per stirpes").c_str());
+    if (priv->combo_state)
+    {
+        std::string st = get_str(ESTATE_GROUP_META, "state", "Florida");
+        int idx = DEFAULT_STATE_INDEX;
+        for (int i = 0; i < static_cast<int>(G_N_ELEMENTS(US_STATES)); ++i)
+        {
+            if (st == US_STATES[i]) { idx = i; break; }
+        }
+        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_state), idx);
+    }
     if (priv->entry_jurisdiction)
-        gtk_entry_set_text(priv->entry_jurisdiction, get_str(ESTATE_GROUP_META, "jurisdiction", "Florida (Hillsborough County)").c_str());
+        gtk_entry_set_text(priv->entry_jurisdiction, get_str(ESTATE_GROUP_META, "jurisdiction", "Hillsborough County").c_str());
     if (priv->entry_attorney)
         gtk_entry_set_text(priv->entry_attorney, get_str(ESTATE_GROUP_META, "attorney", "").c_str());
     if (priv->entry_safe_location)
@@ -833,12 +910,14 @@ load_estate_state(GncPluginPageEstatePrivate* priv)
         if (priv->entry_prepared_for) gtk_entry_set_text(priv->entry_prepared_for, "Greg & Tammy");
         if (priv->entry_scenarios) gtk_entry_set_text(priv->entry_scenarios, "Scenario A (Jan 2027) & Scenario B (Jan 2028)");
         if (priv->entry_heirs) gtk_entry_set_text(priv->entry_heirs, "Hannah (turns 26 Apr 2027) & Peyton (turns 21 Jan 2027) — 50% / 50% equal split, per stirpes");
-        if (priv->entry_jurisdiction) gtk_entry_set_text(priv->entry_jurisdiction, "Florida (Hillsborough County)");
+        if (priv->combo_state) gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_state), DEFAULT_STATE_INDEX);
+        if (priv->entry_jurisdiction) gtk_entry_set_text(priv->entry_jurisdiction, "Hillsborough County");
         if (priv->entry_safe_location) gtk_entry_set_text(priv->entry_safe_location, "Home Fireproof Safe");
         if (priv->entry_next_audit) gtk_entry_set_text(priv->entry_next_audit, "Nov 15 (Annual Tax & MAGI Audit)");
         priv->updating_ui = false;
         save_estate_state(priv, false);
     }
+    update_state_labels(priv);
     refresh_all_views(priv);
 }
 
@@ -847,6 +926,14 @@ on_meta_changed(GtkWidget*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
     save_estate_state(priv, false);
+}
+
+static void
+on_state_changed(GtkComboBox*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    update_state_labels(priv);
+    save_estate_state(priv, true);
 }
 
 static void
@@ -1249,18 +1336,19 @@ on_export_html_clicked(GtkButton*, gpointer user_data)
         gchar* path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
         if (path)
         {
+            std::string st = selected_state_name(priv);
             std::ofstream f(path);
             f << "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-              << "<title>Florida Estate & Continuity Binder</title>"
+              << "<title>" << html_escape(st) << " Estate & Continuity Binder</title>"
               << "<style>body{font-family:sans-serif;max-width:960px;margin:24px auto;color:#222}"
               << "h1,h2{color:#1b4d3e}table{border-collapse:collapse;width:100%;margin:12px 0}"
               << "th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:13px}"
               << "th{background:#f0f4f2}.done{color:#1b7a3d;font-weight:bold}.todo{color:#a34815}</style></head><body>\n";
-            f << "<h1>Florida Estate &amp; Continuity Checklist</h1>\n";
+            f << "<h1>" << html_escape(st) << " Estate &amp; Continuity Checklist</h1>\n";
             f << "<p><strong>Prepared For:</strong> " << html_escape(gtk_entry_get_text(priv->entry_prepared_for))
               << " | <strong>Scenarios:</strong> " << html_escape(gtk_entry_get_text(priv->entry_scenarios)) << "<br>\n"
               << "<strong>Heirs:</strong> " << html_escape(gtk_entry_get_text(priv->entry_heirs)) << "<br>\n"
-              << "<strong>Jurisdiction:</strong> " << html_escape(gtk_entry_get_text(priv->entry_jurisdiction))
+              << "<strong>State / County:</strong> " << html_escape(st) << " (" << html_escape(gtk_entry_get_text(priv->entry_jurisdiction)) << ")"
               << " | <strong>Safe Location:</strong> " << html_escape(gtk_entry_get_text(priv->entry_safe_location)) << "<br>\n"
               << "<strong>Attorney:</strong> " << html_escape(gtk_entry_get_text(priv->entry_attorney))
               << " | <strong>Last Audit:</strong> " << html_escape(gtk_entry_get_text(priv->entry_last_audit))
@@ -1336,10 +1424,12 @@ on_export_md_clicked(GtkButton*, gpointer user_data)
         gchar* path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
         if (path)
         {
+            std::string st = selected_state_name(priv);
             std::ofstream f(path);
-            f << "# FLORIDA ESTATE & CONTINUITY CHECKLIST\n\n"
+            f << "# " << st << " ESTATE & CONTINUITY CHECKLIST\n\n"
               << "**Prepared for:** " << gtk_entry_get_text(priv->entry_prepared_for)
               << " | **Scenarios:** " << gtk_entry_get_text(priv->entry_scenarios) << "\n"
+              << "**State / County:** " << st << " (" << gtk_entry_get_text(priv->entry_jurisdiction) << ")\n"
               << "**Heirs:** " << gtk_entry_get_text(priv->entry_heirs) << "\n\n";
 
             auto emit_md_sec = [&](int sec, const char* heading) {
@@ -1571,10 +1661,10 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
 
     // Toolbar
     GtkWidget* tbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget* lbl_hdr = gtk_label_new(nullptr);
-    gtk_label_set_markup(GTK_LABEL(lbl_hdr),
+    priv->lbl_header = GTK_LABEL(gtk_label_new(nullptr));
+    gtk_label_set_markup(priv->lbl_header,
                          _("<b>Florida Estate &amp; Continuity Tracker</b>"));
-    gtk_box_pack_start(GTK_BOX(tbar), lbl_hdr, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(tbar), GTK_WIDGET(priv->lbl_header), FALSE, FALSE, 4);
 
     GtkWidget* btn_html = gtk_button_new_with_label(_("Export Binder Report (HTML)"));
     GtkWidget* btn_md = gtk_button_new_with_label(_("Export Checklist (Markdown)"));
@@ -1614,12 +1704,26 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     };
     priv->entry_prepared_for = make_meta_entry(_("Prepared For"), 0, 0, 1);
     priv->entry_scenarios    = make_meta_entry(_("Scenarios"), 0, 2, 1);
-    priv->entry_jurisdiction = make_meta_entry(_("Jurisdiction"), 1, 0, 1);
-    priv->entry_safe_location = make_meta_entry(_("Safe / Binder Location"), 1, 2, 1);
-    priv->entry_heirs        = make_meta_entry(_("Heirs / Contingent"), 2, 0, 3);
-    priv->entry_attorney     = make_meta_entry(_("Florida Estate Attorney"), 3, 0, 1);
-    priv->entry_last_audit   = make_meta_entry(_("Last Audit Date"), 3, 2, 1);
-    priv->entry_next_audit   = make_meta_entry(_("Next Audit Target"), 4, 0, 3);
+
+    gtk_grid_attach(GTK_GRID(mgrid), gtk_label_new(_("State")), 0, 1, 1, 1);
+    priv->combo_state = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    for (const char* st : US_STATES)
+        gtk_combo_box_text_append_text(priv->combo_state, st);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_state), DEFAULT_STATE_INDEX);
+    g_signal_connect(priv->combo_state, "changed", G_CALLBACK(on_state_changed), priv);
+    gtk_grid_attach(GTK_GRID(mgrid), GTK_WIDGET(priv->combo_state), 1, 1, 1, 1);
+
+    priv->entry_jurisdiction = make_meta_entry(_("County / Local Area"), 1, 2, 1);
+    priv->entry_safe_location = make_meta_entry(_("Safe / Binder Location"), 2, 0, 1);
+    priv->entry_attorney     = make_meta_entry(_("Estate Attorney"), 2, 2, 1);
+    priv->entry_heirs        = make_meta_entry(_("Heirs / Contingent"), 3, 0, 3);
+    priv->entry_last_audit   = make_meta_entry(_("Last Audit Date"), 4, 0, 1);
+    priv->entry_next_audit   = make_meta_entry(_("Next Audit Target"), 4, 2, 1);
+
+    priv->lbl_state_note = GTK_LABEL(gtk_label_new(""));
+    gtk_label_set_line_wrap(priv->lbl_state_note, TRUE);
+    gtk_label_set_xalign(priv->lbl_state_note, 0.0f);
+    gtk_grid_attach(GTK_GRID(mgrid), GTK_WIDGET(priv->lbl_state_note), 0, 5, 4, 1);
 
     gtk_container_add(GTK_CONTAINER(meta_frame), mgrid);
     gtk_box_pack_start(GTK_BOX(tab_ov), meta_frame, FALSE, FALSE, 0);
