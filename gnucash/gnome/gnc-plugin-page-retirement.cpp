@@ -274,6 +274,7 @@ struct GncPluginPageRetirementPrivate
     GtkTextView* tv_ai_system = nullptr;
     GtkTextView* tv_ai_response = nullptr;
     GtkLabel* lbl_ai_status = nullptr;
+    GtkLabel* lbl_ai_diff = nullptr;
     GtkWidget* btn_ai_apply = nullptr;
     GtkWidget* btn_ai_stop = nullptr;
     SoupSession* soup_session = nullptr;
@@ -281,6 +282,7 @@ struct GncPluginPageRetirementPrivate
     bool updating_ai_ui = false;
     bool has_ai_suggestion = false;
     PlanInput ai_suggested_input;
+    std::vector<std::pair<std::string, std::string>> ai_chat_history;
 };
 
 G_DEFINE_TYPE_WITH_PRIVATE(GncPluginPageRetirement, gnc_plugin_page_retirement, GNC_TYPE_PLUGIN_PAGE)
@@ -334,6 +336,7 @@ gnc_plugin_page_retirement_init(GncPluginPageRetirement* page)
     new (&priv->snap_input) PlanInput();
     new (&priv->snap_result) PlanResult();
     new (&priv->ai_suggested_input) PlanInput();
+    new (&priv->ai_chat_history) std::vector<std::pair<std::string, std::string>>();
 
     gnc_plugin_page_add_book(GNC_PLUGIN_PAGE(page), gnc_get_current_book());
 }
@@ -351,6 +354,7 @@ gnc_plugin_page_retirement_finalize(GObject* object)
     priv->snap_input.~PlanInput();
     priv->snap_result.~PlanResult();
     priv->ai_suggested_input.~PlanInput();
+    priv->ai_chat_history.~vector();
     G_OBJECT_CLASS(gnc_plugin_page_retirement_parent_class)->finalize(object);
 }
 
@@ -1517,6 +1521,16 @@ run_planner(GncPluginPageRetirementPrivate* priv)
     priv->last_input = in;
     priv->last_result = optimize_plan(in);
     const PlanResult& res = priv->last_result;
+
+    if (GKeyFile* st = gnc_state_get_current())
+    {
+        if (!res.schedule.empty())
+        {
+            g_key_file_set_double(st, STATE_GROUP_PLAN, "last_end_tax_deferred", res.schedule.back().end_tax_deferred);
+            g_key_file_set_double(st, STATE_GROUP_PLAN, "last_end_tax_free", res.schedule.back().end_tax_free);
+        }
+        g_key_file_set_double(st, STATE_GROUP_PLAN, "heir_tax_rate", in.heir_tax_rate);
+    }
 
     if (in.objective == PlanObjective::MaximizeSpending)
     {
@@ -2687,6 +2701,7 @@ struct AiStreamCtx
     GInputStream* stream = nullptr;
     std::string line_buf;
     std::string full_reply;
+    std::string user_question;
     bool cleared_thinking = false;
 };
 
@@ -2730,26 +2745,45 @@ finish_ai_stream(std::unique_ptr<AiStreamCtx> ctx, const char* err_msg = nullptr
         }
     }
 
+    if (!ctx->full_reply.empty() && !ctx->user_question.empty())
+    {
+        std::string short_rep = ctx->full_reply.size() > 600
+                              ? ctx->full_reply.substr(0, 600) + "..."
+                              : ctx->full_reply;
+        priv->ai_chat_history.emplace_back(ctx->user_question, std::move(short_rep));
+        if (priv->ai_chat_history.size() > 4)
+            priv->ai_chat_history.erase(priv->ai_chat_history.begin());
+    }
+
     PlanInput suggested = priv->last_input;
     std::vector<std::string> changes;
     if (parse_ai_whatif_json(ctx->full_reply, suggested, changes) && !changes.empty())
     {
         priv->ai_suggested_input = suggested;
         priv->has_ai_suggestion = true;
-        std::string summary = "Detected What-If changes: ";
+        std::string summary;
         for (size_t i = 0; i < changes.size(); ++i)
         {
-            if (i > 0) summary += ", ";
+            if (i > 0) summary += "  •  ";
             summary += changes[i];
         }
+        if (priv->lbl_ai_diff)
+        {
+            gchar* esc = g_markup_escape_text(summary.c_str(), -1);
+            std::string mk = std::string("<b>Proposed What-If Changes:</b>  ") + (esc ? esc : "");
+            g_free(esc);
+            gtk_label_set_markup(priv->lbl_ai_diff, mk.c_str());
+        }
         if (priv->lbl_ai_status)
-            gtk_label_set_text(priv->lbl_ai_status, summary.c_str());
+            gtk_label_set_text(priv->lbl_ai_status, _("What-If changes ready — review diff above and click Apply."));
         if (priv->btn_ai_apply)
             gtk_widget_set_sensitive(priv->btn_ai_apply, TRUE);
     }
     else
     {
         priv->has_ai_suggestion = false;
+        if (priv->lbl_ai_diff)
+            gtk_label_set_text(priv->lbl_ai_diff, "");
         if (priv->lbl_ai_status)
             gtk_label_set_text(priv->lbl_ai_status, _("Done."));
         if (priv->btn_ai_apply)
@@ -2960,8 +2994,14 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
     }
     if (sys_prompt.empty())
         sys_prompt = ai_preset_text(0);
-    std::string full_prompt = build_ai_plan_summary(priv->last_input, priv->last_result)
-                            + "\nQuestion: " + user_question;
+    std::string full_prompt = build_ai_plan_summary(priv->last_input, priv->last_result);
+    if (!priv->ai_chat_history.empty())
+    {
+        full_prompt += "\nRecent Conversation:\n";
+        for (const auto& [hq, ha] : priv->ai_chat_history)
+            full_prompt += "User: " + hq + "\nAssistant: " + ha + "\n";
+    }
+    full_prompt += "\nCurrent Question: " + user_question;
     const bool use_stream = (provider != AiProvider::Gemini);
     std::string body = build_ai_request_json(provider, model, sys_prompt, full_prompt, use_stream, 2048, 1200);
 
@@ -2985,6 +3025,8 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
     g_bytes_unref(req_bytes);
 
     priv->has_ai_suggestion = false;
+    if (priv->lbl_ai_diff)
+        gtk_label_set_text(priv->lbl_ai_diff, "");
     if (priv->btn_ai_apply)
         gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
     if (priv->btn_ai_stop)
@@ -2994,6 +3036,7 @@ send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_que
     set_ai_response_text(priv, use_stream ? "Thinking (streaming tokens)..." : "Thinking...");
 
     auto* ctx = new AiStreamCtx{priv, provider};
+    ctx->user_question = user_question;
     if (use_stream)
         soup_session_send_async(priv->soup_session, msg, G_PRIORITY_DEFAULT, priv->ai_cancel,
                                 on_ai_send_opened, ctx);
@@ -3029,6 +3072,18 @@ on_ai_copy_summary_clicked(GtkButton*, gpointer user_data)
     gtk_clipboard_set_text(cb, summary.c_str(), -1);
     if (priv->lbl_ai_status)
         gtk_label_set_text(priv->lbl_ai_status, _("Copied anonymized summary to clipboard."));
+}
+
+static void
+on_ai_clear_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    priv->ai_chat_history.clear();
+    priv->has_ai_suggestion = false;
+    if (priv->btn_ai_apply) gtk_widget_set_sensitive(priv->btn_ai_apply, FALSE);
+    if (priv->lbl_ai_diff) gtk_label_set_text(priv->lbl_ai_diff, "");
+    set_ai_response_text(priv, "Chat history cleared. Ask a new question or click 'Critique My Plan'.");
+    if (priv->lbl_ai_status) gtk_label_set_text(priv->lbl_ai_status, _("Chat history cleared."));
 }
 
 static void
@@ -4271,11 +4326,19 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     g_signal_connect(btn_ai_critique, "clicked", G_CALLBACK(on_ai_critique_clicked), priv);
     GtkWidget* btn_ai_copy = gtk_button_new_with_label(_("Copy Summary"));
     g_signal_connect(btn_ai_copy, "clicked", G_CALLBACK(on_ai_copy_summary_clicked), priv);
+    GtkWidget* btn_ai_clear = gtk_button_new_with_label(_("Clear Chat"));
+    g_signal_connect(btn_ai_clear, "clicked", G_CALLBACK(on_ai_clear_clicked), priv);
     gtk_box_pack_start(GTK_BOX(ai_qbar), GTK_WIDGET(priv->entry_ai_question), TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(ai_qbar), btn_ai_ask, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(ai_qbar), btn_ai_critique, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(ai_qbar), btn_ai_copy, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_qbar), btn_ai_clear, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(tab_ai), ai_qbar, FALSE, FALSE, 0);
+
+    priv->lbl_ai_diff = GTK_LABEL(gtk_label_new(""));
+    gtk_label_set_line_wrap(priv->lbl_ai_diff, TRUE);
+    gtk_label_set_xalign(priv->lbl_ai_diff, 0.0f);
+    gtk_box_pack_start(GTK_BOX(tab_ai), GTK_WIDGET(priv->lbl_ai_diff), FALSE, FALSE, 0);
 
     priv->tv_ai_response = GTK_TEXT_VIEW(gtk_text_view_new());
     gtk_text_view_set_editable(priv->tv_ai_response, FALSE);
