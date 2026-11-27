@@ -26,6 +26,7 @@
 
 #include "gnc-plugin-retirement.h"
 #include "gnc-plugin-page-retirement.h"
+#include "gnc-plugin-page-estate.h"
 #include "gnc-main-window.h"
 #include "gnc-ui.h"
 
@@ -38,10 +39,14 @@ static void gnc_plugin_retirement_finalize (GObject *object);
 static void gnc_plugin_retirement_cmd_open (GSimpleAction *simple,
                                             GVariant      *parameter,
                                             gpointer       user_data);
+static void gnc_plugin_retirement_cmd_open_estate (GSimpleAction *simple,
+                                                   GVariant      *parameter,
+                                                   gpointer       user_data);
 
 static GActionEntry gnc_plugin_actions [] =
 {
     { "ToolsRetirementPlannerAction", gnc_plugin_retirement_cmd_open, NULL, NULL, NULL },
+    { "ToolsEstatePlannerAction", gnc_plugin_retirement_cmd_open_estate, NULL, NULL, NULL },
 };
 static guint gnc_plugin_n_actions = G_N_ELEMENTS(gnc_plugin_actions);
 
@@ -65,6 +70,7 @@ gnc_plugin_retirement_new (void)
     ENTER(" ");
 
     GNC_TYPE_PLUGIN_PAGE_RETIREMENT;
+    GNC_TYPE_PLUGIN_PAGE_ESTATE;
 
     plugin = g_object_new (GNC_TYPE_PLUGIN_RETIREMENT, NULL);
     LEAVE(" ");
@@ -110,5 +116,19 @@ gnc_plugin_retirement_cmd_open (GSimpleAction *simple,
     g_return_if_fail (data != NULL);
 
     page = gnc_plugin_page_retirement_new ();
+    gnc_main_window_open_page (data->window, page);
+}
+
+static void
+gnc_plugin_retirement_cmd_open_estate (GSimpleAction *simple,
+                                       GVariant      *parameter,
+                                       gpointer       user_data)
+{
+    GncMainWindowActionData *data = user_data;
+    GncPluginPage *page;
+
+    g_return_if_fail (data != NULL);
+
+    page = gnc_plugin_page_estate_new ();
     gnc_main_window_open_page (data->window, page);
 }

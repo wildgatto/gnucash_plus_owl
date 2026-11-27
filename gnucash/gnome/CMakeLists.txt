@@ -52,6 +52,7 @@ set (gnc_gnome_noinst_HEADERS
   gnc-plugin-page-register-sort.hpp
   gnc-plugin-page-report.h
   gnc-plugin-page-retirement.h
+  gnc-plugin-page-estate.h
   gnc-plugin-page-sx-list.h
   gnc-retirement-engine.hpp
   gnc-split-reg.h
@@ -123,6 +124,7 @@ set (gnc_gnome_SOURCES
   gnc-plugin-page-register-filter.cpp
   gnc-plugin-page-register-sort.cpp
   gnc-plugin-page-retirement.cpp
+  gnc-plugin-page-estate.cpp
   gnc-retirement-engine.cpp
   gnc-plugin-page-report.cpp
   gnc-plugin-page-sx-list.cpp

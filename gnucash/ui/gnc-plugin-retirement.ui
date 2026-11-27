@@ -6,5 +6,10 @@
       <attribute name="action">gnc-plugin-retirement-actions.ToolsRetirementPlannerAction</attribute>
       <attribute name="tooltip" translatable="yes">Open the standalone Owl-style retirement income &amp; tax optimization planner</attribute>
     </item>
+    <item>
+      <attribute name="label" translatable="yes">_Estate Planning &amp; Continuity…</attribute>
+      <attribute name="action">gnc-plugin-retirement-actions.ToolsEstatePlannerAction</attribute>
+      <attribute name="tooltip" translatable="yes">Track Florida estate documents, beneficiary audits, tax continuity rules, and ICE records</attribute>
+    </item>
   </menu>
 </interface>
