@@ -1821,7 +1821,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
 
     GtkWidget* ben_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget* bb_upd = gtk_button_new_with_label(_("Update Row"));
-    GtkWidget* bb_add = gtk_button_new_with_label(_("Add Account"));
+    GtkWidget* bb_add = gtk_button_new_with_label(_("Add Asset / Account"));
     GtkWidget* bb_del = gtk_button_new_with_label(_("Delete Row"));
     GtkWidget* bb_sync = gtk_button_new_with_label(_("Check GnuCash Book Total"));
     g_signal_connect(bb_upd, "clicked", G_CALLBACK(on_ben_update_clicked), priv);
