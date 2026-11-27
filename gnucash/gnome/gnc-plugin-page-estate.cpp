@@ -31,6 +31,7 @@
 #include <glib/gstdio.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -67,6 +68,7 @@ struct EstateChecklistItem
     std::string owner_agent;
     std::string completed_date;
     std::string details;
+    std::string doc_path;
 };
 
 struct BeneficiaryAuditRow
@@ -78,6 +80,18 @@ struct BeneficiaryAuditRow
     std::string contingent_structure;
     std::string recheck_trigger;
     std::string last_verified_date;
+    std::string notes;
+    std::string linked_gnucash_acct;
+    std::string doc_path;
+};
+
+struct FiduciaryContact
+{
+    std::string role;
+    std::string name;
+    std::string firm_org;
+    std::string phone;
+    std::string email;
     std::string notes;
 };
 
@@ -101,6 +115,7 @@ struct SectionTabWidgets
     GtkEntry* entry_trigger = nullptr;
     GtkEntry* entry_owner = nullptr;
     GtkEntry* entry_date = nullptr;
+    GtkEntry* entry_doc = nullptr;
     GtkTextView* tv_details = nullptr;
     GtkProgressBar* pbar = nullptr;
     int selected_idx = -1;
@@ -145,6 +160,9 @@ struct GncPluginPageEstatePrivate
     GtkEntry* entry_ben_trigger = nullptr;
     GtkEntry* entry_ben_date = nullptr;
     GtkEntry* entry_ben_notes = nullptr;
+    GtkComboBoxText* combo_ben_gnc_acct = nullptr;
+    GtkEntry* entry_ben_doc = nullptr;
+    GtkLabel* lbl_ben_unmapped = nullptr;
     int selected_ben_idx = -1;
 
     // Section 4: ICE Directory
@@ -157,10 +175,31 @@ struct GncPluginPageEstatePrivate
     GtkEntry* entry_ice_notes = nullptr;
     int selected_ice_idx = -1;
 
+    // Tab 6: Fiduciary & Contacts Roster
+    GtkListStore* contact_store = nullptr;
+    GtkTreeView* contact_tv = nullptr;
+    GtkEntry* entry_ct_role = nullptr;
+    GtkEntry* entry_ct_name = nullptr;
+    GtkEntry* entry_ct_firm = nullptr;
+    GtkEntry* entry_ct_phone = nullptr;
+    GtkEntry* entry_ct_email = nullptr;
+    GtkEntry* entry_ct_notes = nullptr;
+    int selected_contact_idx = -1;
+
+    // Tab 7: Heir 10-Yr Tax Estimator
+    GtkSpinButton* spin_ht_trad = nullptr;
+    GtkSpinButton* spin_ht_roth = nullptr;
+    GtkSpinButton* spin_ht_heirs = nullptr;
+    GtkSpinButton* spin_ht_rate = nullptr;
+    GtkSpinButton* spin_ht_growth = nullptr;
+    GtkComboBoxText* combo_ht_strategy = nullptr;
+    GtkTextView* tv_ht_report = nullptr;
+
     // Data
     std::vector<EstateChecklistItem> items;
     std::vector<BeneficiaryAuditRow> ben_rows;
     std::vector<IceDirectoryRow> ice_rows;
+    std::vector<FiduciaryContact> contacts;
     bool updating_ui = false;
 };
 
@@ -171,6 +210,8 @@ static constexpr const char* ESTATE_GROUP_META = "EstateMeta";
 static constexpr const char* ESTATE_GROUP_ITEMS = "EstateChecklistItems";
 static constexpr const char* ESTATE_GROUP_BEN = "EstateBeneficiaries";
 static constexpr const char* ESTATE_GROUP_ICE = "EstateIceDirectory";
+static constexpr const char* ESTATE_GROUP_CONTACTS = "EstateContacts";
+static constexpr const char* ESTATE_GROUP_HEIR_TAX = "EstateHeirTax";
 
 static std::string
 today_iso_date()
@@ -182,6 +223,117 @@ today_iso_date()
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
                   tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
     return buf;
+}
+
+static bool
+is_date_stale(const std::string& iso_date)
+{
+    if (iso_date.size() < 10)
+        return true;
+    int y = 0, m = 0, d = 0;
+    if (std::sscanf(iso_date.c_str(), "%d-%d-%d", &y, &m, &d) != 3)
+        return true;
+    std::tm tm_d{};
+    tm_d.tm_year = y - 1900;
+    tm_d.tm_mon = m - 1;
+    tm_d.tm_mday = d;
+    tm_d.tm_isdst = -1;
+    std::time_t t_d = std::mktime(&tm_d);
+    if (t_d == static_cast<std::time_t>(-1))
+        return true;
+    double days = std::difftime(std::time(nullptr), t_d) / 86400.0;
+    return days > 365.0;
+}
+
+static std::string
+fmt_money_str(double v)
+{
+    long long iv = static_cast<long long>(std::llround(v));
+    bool neg = iv < 0;
+    if (neg) iv = -iv;
+    std::string digits = std::to_string(iv);
+    std::string out;
+    for (size_t i = 0; i < digits.size(); ++i)
+    {
+        if (i > 0 && (digits.size() - i) % 3 == 0)
+            out += ',';
+        out += digits[i];
+    }
+    return (neg ? "-$" : "$") + out;
+}
+
+static std::vector<std::pair<std::string, double>>
+collect_gnucash_asset_accounts()
+{
+    std::vector<std::pair<std::string, double>> out;
+    QofBook* book = gnc_get_current_book();
+    if (!book) return out;
+    Account* root = gnc_book_get_root_account(book);
+    if (!root) return out;
+    GList* all_accts = gnc_account_get_descendants_sorted(root);
+    for (GList* n = all_accts; n; n = n->next)
+    {
+        Account* a = GNC_ACCOUNT(n->data);
+        GNCAccountType t = xaccAccountGetType(a);
+        if ((t == ACCT_TYPE_BANK || t == ACCT_TYPE_CASH || t == ACCT_TYPE_STOCK ||
+             t == ACCT_TYPE_MUTUAL || t == ACCT_TYPE_ASSET) &&
+            gnc_account_n_children(a) == 0)
+        {
+            gchar* fname = gnc_account_get_full_name(a);
+            double bal = gnc_numeric_to_double(xaccAccountGetBalance(a));
+            if (fname)
+            {
+                out.emplace_back(fname, bal);
+                g_free(fname);
+            }
+        }
+    }
+    g_list_free(all_accts);
+    return out;
+}
+
+static void
+browse_and_set_doc_path(GtkEntry* entry)
+{
+    if (!entry) return;
+    GtkWidget* dlg = gtk_file_chooser_dialog_new(
+        _("Select Document or Scan"), nullptr, GTK_FILE_CHOOSER_ACTION_OPEN,
+        _("_Cancel"), GTK_RESPONSE_CANCEL, _("_Open"), GTK_RESPONSE_ACCEPT, nullptr);
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT)
+    {
+        gchar* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        if (fn)
+        {
+            gtk_entry_set_text(entry, fn);
+            g_free(fn);
+        }
+    }
+    gtk_widget_destroy(dlg);
+}
+
+static void
+open_doc_path(GtkEntry* entry, GtkLabel* status_lbl)
+{
+    if (!entry) return;
+    std::string p = gtk_entry_get_text(entry);
+    if (p.empty()) return;
+    std::string uri = p;
+    if (p.find("://") == std::string::npos)
+    {
+        gchar* u = g_filename_to_uri(p.c_str(), nullptr, nullptr);
+        if (u)
+        {
+            uri = u;
+            g_free(u);
+        }
+    }
+    GError* err = nullptr;
+    if (!gtk_show_uri_on_window(nullptr, uri.c_str(), GDK_CURRENT_TIME, &err))
+    {
+        if (status_lbl)
+            gtk_label_set_text(status_lbl, err ? err->message : _("Could not open document."));
+        if (err) g_error_free(err);
+    }
 }
 
 static std::string
@@ -451,6 +603,68 @@ populate_default_florida_checklist(GncPluginPageEstatePrivate* priv)
     priv->ice_rows.push_back({false, "Password/2FA", "Password Manager & Hardware 2FA Keys", "Master Vault + Recovery Codes", "Home Fireproof Safe", "Test emergency access annually"});
     priv->ice_rows.push_back({false, "Email/Domain", "Personal Email & Domain Registrar", "Domain Admin & Cloud Storage", "Password Manager + Safe Backup", "Check renewal dates & recovery email"});
     priv->ice_rows.push_back({false, "Financial", "SSA.gov / Login.gov", "Greg & Tammy Benefit Accounts", "Password Manager + Safe Backup", "Includes Survivor SS Playbook"});
+
+    priv->contacts.clear();
+    priv->contacts.push_back({"Personal Representative (Executor)", "Tammy / Greg (Spouse)", "", "", "", "Primary executor named in Will"});
+    priv->contacts.push_back({"Backup Executor", "", "", "", "", "Alternate if spouse unable to serve"});
+    priv->contacts.push_back({"Financial POA Agent", "Spouse", "", "", "", "Immediate durable financial authority"});
+    priv->contacts.push_back({"Backup Financial POA Agent", "Hannah / Peyton (evaluate)", "", "", "", "Successor agent when age-eligible"});
+    priv->contacts.push_back({"Health Care Surrogate", "Spouse", "", "", "", "Primary medical decision-maker"});
+    priv->contacts.push_back({"Backup Health Care Surrogate", "Hannah / Peyton (evaluate)", "", "", "", "Successor medical surrogate"});
+    priv->contacts.push_back({"Florida Estate Planning Attorney", "", "", "", "", "Drafts/reviews Will, Trust/Lady Bird, POA, Surrogate"});
+    priv->contacts.push_back({"CPA / Tax Advisor", "", "", "", "", "Roth ladder, MAGI, and estate/final return"});
+    priv->contacts.push_back({"Insurance Agent / Broker", "", "", "", "", "Home, auto, umbrella, ACA/Medicare"});
+}
+
+static void
+populate_default_contacts_only(GncPluginPageEstatePrivate* priv)
+{
+    priv->contacts.clear();
+    priv->contacts.push_back({"Personal Representative (Executor)", "Spouse / Primary", "", "", "", "Primary executor named in Will"});
+    priv->contacts.push_back({"Backup Executor", "", "", "", "", "Alternate executor"});
+    priv->contacts.push_back({"Financial POA Agent", "Spouse / Primary", "", "", "", "Durable financial power of attorney"});
+    priv->contacts.push_back({"Backup Financial POA Agent", "", "", "", "", "Successor financial agent"});
+    priv->contacts.push_back({"Health Care Surrogate / Proxy", "Spouse / Primary", "", "", "", "Medical decision-maker"});
+    priv->contacts.push_back({"Estate Planning Attorney", "", "", "", "", "Drafts/reviews state estate documents"});
+    priv->contacts.push_back({"CPA / Tax Advisor", "", "", "", "", "Tax & inherited IRA planning"});
+    priv->contacts.push_back({"Insurance Agent / Broker", "", "", "", "", "Home, auto, umbrella, health"});
+}
+
+static void
+populate_generic_us_template(GncPluginPageEstatePrivate* priv, const std::string& state_name)
+{
+    priv->items.clear();
+    priv->ben_rows.clear();
+    priv->ice_rows.clear();
+
+    priv->items.push_back({false, SEC_LEGAL, "Last Will & Testament (Self-Proving Affidavit)", "Not Started", "Pre-Retirement", state_name + " Estate Attorney", "", "Names executor/personal representative, guardianship if needed, and pour-over provisions.", ""});
+    priv->items.push_back({false, SEC_LEGAL, "Revocable Living Trust or Transfer-on-Death (TOD) Deed", "Not Started", "Pre-Retirement", state_name + " Estate Attorney", "", "Avoids probate in " + state_name + " and provides incapacity management.", ""});
+    priv->items.push_back({false, SEC_LEGAL, "Durable Power of Attorney (Financial)", "Not Started", "Pre-Retirement", state_name + " Estate Attorney", "", "Verify state-specific statutory POA requirements in " + state_name + ".", ""});
+    priv->items.push_back({false, SEC_LEGAL, "Health Care Proxy / Advance Directive & HIPAA Release", "Not Started", "Pre-Retirement", state_name + " Estate Attorney", "", "Appoints medical agent and grants HIPAA record access.", ""});
+    priv->items.push_back({false, SEC_LEGAL, "Living Will", "Not Started", "Pre-Retirement", state_name + " Estate Attorney", "", "Documents end-of-life care preferences.", ""});
+
+    priv->items.push_back({false, SEC_TAX, "Avoid HSA Non-Spouse Tax Trap", "Not Started", "Ongoing", "Account Owner", "", "Name spouse as primary HSA beneficiary; non-spouse heirs face 100% ordinary income tax at death.", ""});
+    priv->items.push_back({false, SEC_TAX, "Plan Around SECURE Act 10-Year Rule", "Not Started", "Ongoing", "Account Owner", "", "Non-spouse heirs must empty inherited IRAs within 10 years; evaluate Roth conversions.", ""});
+    priv->items.push_back({false, SEC_TAX, "Confirm Per Stirpes Designations", "Not Started", "Annual Audit", "Account Owner", "", "Use per stirpes across retirement and TOD/POD accounts.", ""});
+    priv->items.push_back({false, SEC_TAX, "Survivor Social Security & Pension Playbook", "Not Started", "Pre-Retirement", "Spouse / Executor", "", "Document exact claiming instructions so surviving spouse switches to higher benefit.", ""});
+
+    priv->items.push_back({false, SEC_ICE, "Master Account & Bill-Pay Directory", "Not Started", "Annual Audit", "Household", "", "Encrypted/safe sheet listing institutions, policies, property tax IDs, and auto-pay bills.", ""});
+    priv->items.push_back({false, SEC_ICE, "Password Manager & 2FA Recovery Keys", "Not Started", "Annual Audit", "Household", "", "Store emergency access and hardware 2FA backup codes in physical safe.", ""});
+    priv->items.push_back({false, SEC_ICE, "Email & Domain Continuity", "Not Started", "Annual Audit", "Household", "", "Document registrar logins and recovery emails.", ""});
+
+    priv->ben_rows.push_back({false, "Primary 401(k) / 403(b)", "", "Spouse (100%)", "Heirs (per stirpes)", "Re-verify upon IRA rollover", "", "", "", ""});
+    priv->ben_rows.push_back({false, "Traditional & Roth IRAs", "", "Spouse (100%)", "Heirs (per stirpes)", "Verify after annual contributions/conversions", "", "", "", ""});
+    priv->ben_rows.push_back({false, "HSA(s)", "", "Spouse (100%)", "Heirs (per stirpes)", "Verify upon opening", "", "", "", ""});
+    priv->ben_rows.push_back({false, "Checking / Savings / CDs", "", "JTWROS", "POD to Heirs", "Annual audit", "", "", "", ""});
+    priv->ben_rows.push_back({false, "Taxable Brokerage", "", "JTWROS", "TOD to Heirs", "Annual audit", "", "", "", ""});
+    priv->ben_rows.push_back({false, "Primary Residence", "", "Joint / TBE / Trust", "Trust or TOD/Lady Bird Deed", "Verify recorded deed", "", "", "", ""});
+
+    priv->ice_rows.push_back({false, "Financial", "Primary Brokerage / IRA Custodian", "", "Password Manager + Safe", ""});
+    priv->ice_rows.push_back({false, "Financial", "Primary Bank / Credit Union", "", "Password Manager + Safe", ""});
+    priv->ice_rows.push_back({false, "Insurance", "Home / Auto / Umbrella / Health", "", "Estate Binder", ""});
+    priv->ice_rows.push_back({false, "Password/2FA", "Password Manager & 2FA Backup Keys", "", "Fireproof Safe", ""});
+
+    populate_default_contacts_only(priv);
 }
 
 static const char* const US_STATES[] = {
@@ -547,7 +761,8 @@ write_estate_to_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
                           sanitize_field(it.due_trigger) + "|" +
                           sanitize_field(it.owner_agent) + "|" +
                           sanitize_field(it.completed_date) + "|" +
-                          escape_multiline(it.details);
+                          escape_multiline(it.details) + "|" +
+                          sanitize_field(it.doc_path);
         std::string key = "item_" + std::to_string(i);
         g_key_file_set_string(kf, ESTATE_GROUP_ITEMS, key.c_str(), val.c_str());
     }
@@ -564,7 +779,9 @@ write_estate_to_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
                           sanitize_field(b.contingent_structure) + "|" +
                           sanitize_field(b.recheck_trigger) + "|" +
                           sanitize_field(b.last_verified_date) + "|" +
-                          escape_multiline(b.notes);
+                          escape_multiline(b.notes) + "|" +
+                          sanitize_field(b.linked_gnucash_acct) + "|" +
+                          sanitize_field(b.doc_path);
         std::string key = "ben_" + std::to_string(i);
         g_key_file_set_string(kf, ESTATE_GROUP_BEN, key.c_str(), val.c_str());
     }
@@ -583,6 +800,34 @@ write_estate_to_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
         std::string key = "ice_" + std::to_string(i);
         g_key_file_set_string(kf, ESTATE_GROUP_ICE, key.c_str(), val.c_str());
     }
+
+    g_key_file_remove_group(kf, ESTATE_GROUP_CONTACTS, nullptr);
+    g_key_file_set_integer(kf, ESTATE_GROUP_CONTACTS, "count", static_cast<int>(priv->contacts.size()));
+    for (size_t i = 0; i < priv->contacts.size(); ++i)
+    {
+        const auto& c = priv->contacts[i];
+        std::string val = sanitize_field(c.role) + "|" +
+                          sanitize_field(c.name) + "|" +
+                          sanitize_field(c.firm_org) + "|" +
+                          sanitize_field(c.phone) + "|" +
+                          sanitize_field(c.email) + "|" +
+                          escape_multiline(c.notes);
+        std::string key = "contact_" + std::to_string(i);
+        g_key_file_set_string(kf, ESTATE_GROUP_CONTACTS, key.c_str(), val.c_str());
+    }
+
+    if (priv->spin_ht_trad)
+        g_key_file_set_double(kf, ESTATE_GROUP_HEIR_TAX, "trad_bal", gtk_spin_button_get_value(priv->spin_ht_trad));
+    if (priv->spin_ht_roth)
+        g_key_file_set_double(kf, ESTATE_GROUP_HEIR_TAX, "roth_bal", gtk_spin_button_get_value(priv->spin_ht_roth));
+    if (priv->spin_ht_heirs)
+        g_key_file_set_integer(kf, ESTATE_GROUP_HEIR_TAX, "heirs", gtk_spin_button_get_value_as_int(priv->spin_ht_heirs));
+    if (priv->spin_ht_rate)
+        g_key_file_set_double(kf, ESTATE_GROUP_HEIR_TAX, "tax_rate", gtk_spin_button_get_value(priv->spin_ht_rate));
+    if (priv->spin_ht_growth)
+        g_key_file_set_double(kf, ESTATE_GROUP_HEIR_TAX, "growth_rate", gtk_spin_button_get_value(priv->spin_ht_growth));
+    if (priv->combo_ht_strategy)
+        g_key_file_set_integer(kf, ESTATE_GROUP_HEIR_TAX, "strategy", gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ht_strategy)));
 }
 
 static void
@@ -668,7 +913,7 @@ load_estate_from_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
     {
         std::string raw = get_str(ESTATE_GROUP_ITEMS, ("item_" + std::to_string(i)).c_str(), "");
         if (raw.empty()) continue;
-        auto p = split_pipes(raw, 8);
+        auto p = split_pipes(raw, 9);
         EstateChecklistItem it;
         it.done = (p[0] == "1");
         it.section = std::clamp(std::atoi(p[1].c_str()), 0, 2);
@@ -678,6 +923,7 @@ load_estate_from_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
         it.owner_agent = p[5];
         it.completed_date = p[6];
         it.details = unescape_multiline(p[7]);
+        it.doc_path = p[8];
         priv->items.push_back(std::move(it));
     }
 
@@ -687,7 +933,7 @@ load_estate_from_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
     {
         std::string raw = get_str(ESTATE_GROUP_BEN, ("ben_" + std::to_string(i)).c_str(), "");
         if (raw.empty()) continue;
-        auto p = split_pipes(raw, 8);
+        auto p = split_pipes(raw, 10);
         BeneficiaryAuditRow b;
         b.verified = (p[0] == "1");
         b.account_name = p[1];
@@ -697,6 +943,8 @@ load_estate_from_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
         b.recheck_trigger = p[5];
         b.last_verified_date = p[6];
         b.notes = unescape_multiline(p[7]);
+        b.linked_gnucash_acct = p[8];
+        b.doc_path = p[9];
         priv->ben_rows.push_back(std::move(b));
     }
 
@@ -715,6 +963,48 @@ load_estate_from_keyfile(GncPluginPageEstatePrivate* priv, GKeyFile* kf)
         r.recovery_location = p[4];
         r.notes = unescape_multiline(p[5]);
         priv->ice_rows.push_back(std::move(r));
+    }
+
+    priv->contacts.clear();
+    if (g_key_file_has_group(kf, ESTATE_GROUP_CONTACTS))
+    {
+        int n_ct = g_key_file_get_integer(kf, ESTATE_GROUP_CONTACTS, "count", nullptr);
+        for (int i = 0; i < n_ct; ++i)
+        {
+            std::string raw = get_str(ESTATE_GROUP_CONTACTS, ("contact_" + std::to_string(i)).c_str(), "");
+            if (raw.empty()) continue;
+            auto p = split_pipes(raw, 6);
+            FiduciaryContact c;
+            c.role = p[0];
+            c.name = p[1];
+            c.firm_org = p[2];
+            c.phone = p[3];
+            c.email = p[4];
+            c.notes = unescape_multiline(p[5]);
+            priv->contacts.push_back(std::move(c));
+        }
+    }
+    if (priv->contacts.empty())
+        populate_default_contacts_only(priv);
+
+    if (g_key_file_has_group(kf, ESTATE_GROUP_HEIR_TAX))
+    {
+        auto get_dbl = [&](const char* k, double def) {
+            GError* err = nullptr;
+            double v = g_key_file_get_double(kf, ESTATE_GROUP_HEIR_TAX, k, &err);
+            if (err) { g_error_free(err); return def; }
+            return v;
+        };
+        if (priv->spin_ht_trad) gtk_spin_button_set_value(priv->spin_ht_trad, get_dbl("trad_bal", 1729711.0));
+        if (priv->spin_ht_roth) gtk_spin_button_set_value(priv->spin_ht_roth, get_dbl("roth_bal", 54100.0));
+        if (priv->spin_ht_heirs) gtk_spin_button_set_value(priv->spin_ht_heirs, get_dbl("heirs", 2.0));
+        if (priv->spin_ht_rate) gtk_spin_button_set_value(priv->spin_ht_rate, get_dbl("tax_rate", 24.0));
+        if (priv->spin_ht_growth) gtk_spin_button_set_value(priv->spin_ht_growth, get_dbl("growth_rate", 6.0));
+        if (priv->combo_ht_strategy)
+        {
+            int st = g_key_file_get_integer(kf, ESTATE_GROUP_HEIR_TAX, "strategy", nullptr);
+            gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ht_strategy), std::clamp(st, 0, 1));
+        }
     }
 
     priv->updating_ui = false;
@@ -839,6 +1129,12 @@ refresh_ben_store(GncPluginPageEstatePrivate* priv)
     for (size_t i = 0; i < priv->ben_rows.size(); ++i)
     {
         const auto& b = priv->ben_rows[i];
+        bool stale = !b.verified || is_date_stale(b.last_verified_date);
+        const char* color = !b.verified ? "#a34815" : (stale ? "#b45309" : "#1b7a3d");
+        std::string status_date = b.last_verified_date;
+        if (b.verified && stale)
+            status_date += status_date.empty() ? " (Stale >12m)" : " (Stale)";
+
         GtkTreeIter iter;
         gtk_list_store_append(priv->ben_store, &iter);
         gtk_list_store_set(priv->ben_store, &iter,
@@ -849,9 +1145,148 @@ refresh_ben_store(GncPluginPageEstatePrivate* priv)
                            4, b.primary_beneficiary.c_str(),
                            5, b.contingent_structure.c_str(),
                            6, b.recheck_trigger.c_str(),
-                           7, b.last_verified_date.c_str(),
+                           7, status_date.c_str(),
+                           8, color,
                            -1);
     }
+
+    if (priv->lbl_ben_unmapped)
+    {
+        auto accts = collect_gnucash_asset_accounts();
+        std::vector<std::string> unlinked;
+        for (const auto& [name, bal] : accts)
+        {
+            if (bal <= 0.01) continue;
+            bool found = false;
+            for (const auto& b : priv->ben_rows)
+            {
+                if (b.linked_gnucash_acct == name) { found = true; break; }
+            }
+            if (!found) unlinked.push_back(name + " (" + fmt_money_str(bal) + ")");
+        }
+        if (unlinked.empty())
+            gtk_label_set_text(priv->lbl_ben_unmapped, _("All positive-balance GnuCash asset/investment accounts are linked."));
+        else
+        {
+            std::string msg = "Unlinked GnuCash Accounts (" + std::to_string(unlinked.size()) + "): ";
+            for (size_t i = 0; i < std::min<size_t>(unlinked.size(), 4); ++i)
+            {
+                if (i > 0) msg += "; ";
+                msg += unlinked[i];
+            }
+            if (unlinked.size() > 4) msg += " ...";
+            gtk_label_set_text(priv->lbl_ben_unmapped, msg.c_str());
+        }
+    }
+}
+
+static void
+refresh_contact_store(GncPluginPageEstatePrivate* priv)
+{
+    if (!priv->contact_store) return;
+    gtk_list_store_clear(priv->contact_store);
+    for (size_t i = 0; i < priv->contacts.size(); ++i)
+    {
+        const auto& c = priv->contacts[i];
+        GtkTreeIter iter;
+        gtk_list_store_append(priv->contact_store, &iter);
+        gtk_list_store_set(priv->contact_store, &iter,
+                           0, static_cast<gint>(i),
+                           1, c.role.c_str(),
+                           2, c.name.c_str(),
+                           3, c.firm_org.c_str(),
+                           4, c.phone.c_str(),
+                           5, c.email.c_str(),
+                           6, c.notes.c_str(),
+                           -1);
+    }
+}
+
+static void
+recompute_heir_tax_estimator(GncPluginPageEstatePrivate* priv)
+{
+    if (!priv || !priv->tv_ht_report || !priv->spin_ht_trad)
+        return;
+
+    double trad0 = gtk_spin_button_get_value(priv->spin_ht_trad);
+    double roth0 = gtk_spin_button_get_value(priv->spin_ht_roth);
+    int heirs = std::max(1, gtk_spin_button_get_value_as_int(priv->spin_ht_heirs));
+    double rate = gtk_spin_button_get_value(priv->spin_ht_rate) / 100.0;
+    double growth = gtk_spin_button_get_value(priv->spin_ht_growth) / 100.0;
+    int strat = priv->combo_ht_strategy ? gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ht_strategy)) : 0;
+
+    std::ostringstream os;
+    os << "SECURE ACT 10-YEAR INHERITED ACCOUNT TAX PROJECTION\n";
+    os << "==================================================\n";
+    os << "Starting Inherited Tax-Deferred: " << fmt_money_str(trad0)
+       << "  |  Starting Inherited Roth: " << fmt_money_str(roth0) << "\n";
+    os << "Heirs: " << heirs << "  |  Est. Heir Marginal Rate: " << (rate * 100.0)
+       << "%  |  Growth: " << (growth * 100.0) << "%/yr\n";
+    os << "Strategy: " << (strat == 0 ? "Even 10-Year Spread" : "Year-10 Lump Sum (Deferral)") << "\n\n";
+
+    double bal_trad = trad0;
+    double bal_roth = roth0;
+    double tot_tax_trad = 0.0;
+    double tot_net_trad = 0.0;
+    double tot_net_roth = 0.0;
+
+    char line[160];
+    std::snprintf(line, sizeof(line), "%-4s  %-14s  %-14s  %-14s  %-14s\n",
+                  "Yr", "Trad Dist", "Heir Tax", "Net Trad", "Net Roth");
+    os << line;
+    os << "----  --------------  --------------  --------------  --------------\n";
+
+    for (int yr = 1; yr <= 10; ++yr)
+    {
+        bal_trad *= (1.0 + growth);
+        bal_roth *= (1.0 + growth);
+
+        double dist_trad = 0.0;
+        double dist_roth = 0.0;
+        if (strat == 0)
+        {
+            int rem = 11 - yr;
+            dist_trad = bal_trad / rem;
+            dist_roth = bal_roth / rem;
+        }
+        else if (yr == 10)
+        {
+            dist_trad = bal_trad;
+            dist_roth = bal_roth;
+        }
+
+        bal_trad -= dist_trad;
+        bal_roth -= dist_roth;
+
+        double tax = dist_trad * rate;
+        double net_t = dist_trad - tax;
+        tot_tax_trad += tax;
+        tot_net_trad += net_t;
+        tot_net_roth += dist_roth;
+
+        std::snprintf(line, sizeof(line), "%2d    %-14s  %-14s  %-14s  %-14s\n",
+                      yr,
+                      fmt_money_str(dist_trad).c_str(),
+                      fmt_money_str(tax).c_str(),
+                      fmt_money_str(net_t).c_str(),
+                      fmt_money_str(dist_roth).c_str());
+        os << line;
+    }
+
+    os << "\nSUMMARY OVER 10-YEAR WINDOW\n";
+    os << "--------------------------------------------------\n";
+    os << "Total Tax Paid by Heirs on Inherited Traditional: " << fmt_money_str(tot_tax_trad) << "\n";
+    os << "Total Net After-Tax Inheritance (Trad + Roth):    " << fmt_money_str(tot_net_trad + tot_net_roth) << "\n";
+    os << "Per-Heir Net After-Tax (" << heirs << " heirs):                 "
+       << fmt_money_str((tot_net_trad + tot_net_roth) / heirs) << "\n\n";
+
+    double all_roth_net = (trad0 + roth0) * std::pow(1.0 + growth, strat == 0 ? 5.5 : 10.0);
+    (void)all_roth_net;
+    os << "Note: Every $100,000 converted to Roth during your 12%/22% retirement window\n"
+       << "saves heirs " << fmt_money_str(100000.0 * rate) << " in tax at " << (rate * 100.0)
+       << "% (before compounding over 10 years).\n";
+
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ht_report), os.str().c_str(), -1);
 }
 
 static void
@@ -883,7 +1318,9 @@ refresh_all_views(GncPluginPageEstatePrivate* priv)
         refresh_section_store(priv, s);
     refresh_ben_store(priv);
     refresh_ice_store(priv);
+    refresh_contact_store(priv);
     update_progress_bars_and_triggers(priv);
+    recompute_heir_tax_estimator(priv);
 }
 
 static void
@@ -992,6 +1429,7 @@ on_sec_selection_changed(GtkTreeSelection* sel, gpointer user_data)
             gtk_entry_set_text(tab.entry_trigger, it.due_trigger.c_str());
             gtk_entry_set_text(tab.entry_owner, it.owner_agent.c_str());
             gtk_entry_set_text(tab.entry_date, it.completed_date.c_str());
+            if (tab.entry_doc) gtk_entry_set_text(tab.entry_doc, it.doc_path.c_str());
             gtk_text_buffer_set_text(gtk_text_view_get_buffer(tab.tv_details), it.details.c_str(), -1);
         }
     }
@@ -1031,6 +1469,7 @@ on_sec_update_clicked(GtkButton*, gpointer user_data)
     it.completed_date = gtk_entry_get_text(tab.entry_date);
     if (it.done && it.completed_date.empty())
         it.completed_date = today_iso_date();
+    if (tab.entry_doc) it.doc_path = gtk_entry_get_text(tab.entry_doc);
     it.details = read_text_view(tab.tv_details);
 
     refresh_section_store(priv, sec);
@@ -1059,6 +1498,7 @@ on_sec_add_clicked(GtkButton*, gpointer user_data)
     it.due_trigger = gtk_entry_get_text(tab.entry_trigger);
     it.owner_agent = gtk_entry_get_text(tab.entry_owner);
     it.completed_date = gtk_entry_get_text(tab.entry_date);
+    if (tab.entry_doc) it.doc_path = gtk_entry_get_text(tab.entry_doc);
     it.details = read_text_view(tab.tv_details);
 
     priv->items.push_back(std::move(it));
@@ -1085,6 +1525,20 @@ on_sec_delete_clicked(GtkButton*, gpointer user_data)
 }
 
 static void
+on_sec_browse_doc_clicked(GtkButton*, gpointer user_data)
+{
+    auto* pair = static_cast<std::pair<GncPluginPageEstatePrivate*, int>*>(user_data);
+    browse_and_set_doc_path(pair->first->sec_tabs[pair->second].entry_doc);
+}
+
+static void
+on_sec_open_doc_clicked(GtkButton*, gpointer user_data)
+{
+    auto* pair = static_cast<std::pair<GncPluginPageEstatePrivate*, int>*>(user_data);
+    open_doc_path(pair->first->sec_tabs[pair->second].entry_doc, pair->first->lbl_status);
+}
+
+static void
 on_ben_toggle(GtkCellRendererToggle*, gchar* path_str, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
@@ -1105,6 +1559,47 @@ on_ben_toggle(GtkCellRendererToggle*, gchar* path_str, gpointer user_data)
         }
     }
     gtk_tree_path_free(path);
+}
+
+static std::string
+get_selected_ben_gnc_acct(GncPluginPageEstatePrivate* priv)
+{
+    if (!priv->combo_ben_gnc_acct) return "";
+    gchar* t = gtk_combo_box_text_get_active_text(priv->combo_ben_gnc_acct);
+    std::string s = t ? t : "";
+    g_free(t);
+    if (s == "(None / Manual)") return "";
+    return s;
+}
+
+static void
+set_selected_ben_gnc_acct(GncPluginPageEstatePrivate* priv, const std::string& acct)
+{
+    if (!priv->combo_ben_gnc_acct) return;
+    if (acct.empty())
+    {
+        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ben_gnc_acct), 0);
+        return;
+    }
+    GtkTreeModel* m = gtk_combo_box_get_model(GTK_COMBO_BOX(priv->combo_ben_gnc_acct));
+    GtkTreeIter iter;
+    int idx = 0;
+    bool valid = gtk_tree_model_get_iter_first(m, &iter);
+    while (valid)
+    {
+        gchar* val = nullptr;
+        gtk_tree_model_get(m, &iter, 0, &val, -1);
+        if (val && acct == val)
+        {
+            g_free(val);
+            gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ben_gnc_acct), idx);
+            return;
+        }
+        g_free(val);
+        valid = gtk_tree_model_iter_next(m, &iter);
+        ++idx;
+    }
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ben_gnc_acct), 0);
 }
 
 static void
@@ -1128,6 +1623,8 @@ on_ben_selection_changed(GtkTreeSelection* sel, gpointer user_data)
             gtk_entry_set_text(priv->entry_ben_trigger, b.recheck_trigger.c_str());
             gtk_entry_set_text(priv->entry_ben_date, b.last_verified_date.c_str());
             gtk_entry_set_text(priv->entry_ben_notes, b.notes.c_str());
+            set_selected_ben_gnc_acct(priv, b.linked_gnucash_acct);
+            if (priv->entry_ben_doc) gtk_entry_set_text(priv->entry_ben_doc, b.doc_path.c_str());
         }
     }
 }
@@ -1146,6 +1643,8 @@ on_ben_update_clicked(GtkButton*, gpointer user_data)
     b.recheck_trigger = gtk_entry_get_text(priv->entry_ben_trigger);
     b.last_verified_date = gtk_entry_get_text(priv->entry_ben_date);
     b.notes = gtk_entry_get_text(priv->entry_ben_notes);
+    b.linked_gnucash_acct = get_selected_ben_gnc_acct(priv);
+    if (priv->entry_ben_doc) b.doc_path = gtk_entry_get_text(priv->entry_ben_doc);
     refresh_ben_store(priv);
     update_progress_bars_and_triggers(priv);
     save_estate_state(priv, true);
@@ -1165,11 +1664,27 @@ on_ben_add_clicked(GtkButton*, gpointer user_data)
     b.recheck_trigger = gtk_entry_get_text(priv->entry_ben_trigger);
     b.last_verified_date = gtk_entry_get_text(priv->entry_ben_date);
     b.notes = gtk_entry_get_text(priv->entry_ben_notes);
+    b.linked_gnucash_acct = get_selected_ben_gnc_acct(priv);
+    if (priv->entry_ben_doc) b.doc_path = gtk_entry_get_text(priv->entry_ben_doc);
     priv->ben_rows.push_back(std::move(b));
     priv->selected_ben_idx = static_cast<int>(priv->ben_rows.size()) - 1;
     refresh_ben_store(priv);
     update_progress_bars_and_triggers(priv);
     save_estate_state(priv, true);
+}
+
+static void
+on_ben_browse_doc_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    browse_and_set_doc_path(priv->entry_ben_doc);
+}
+
+static void
+on_ben_open_doc_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    open_doc_path(priv->entry_ben_doc, priv->lbl_status);
 }
 
 static void
@@ -1189,34 +1704,37 @@ static void
 on_ben_sync_book_clicked(GtkButton*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
-    QofBook* book = gnc_get_current_book();
-    if (!book)
-        return;
-    Account* root = gnc_book_get_root_account(book);
-    if (!root)
-        return;
-
-    GList* all_accts = gnc_account_get_descendants_sorted(root);
+    auto accts = collect_gnucash_asset_accounts();
     double total_assets = 0.0;
-    for (GList* n = all_accts; n; n = n->next)
+    int updated = 0;
+    for (const auto& [name, bal] : accts)
+        total_assets += bal;
+
+    for (auto& b : priv->ben_rows)
     {
-        Account* a = GNC_ACCOUNT(n->data);
-        GNCAccountType t = xaccAccountGetType(a);
-        if (t == ACCT_TYPE_BANK || t == ACCT_TYPE_CASH || t == ACCT_TYPE_STOCK ||
-            t == ACCT_TYPE_MUTUAL || t == ACCT_TYPE_ASSET)
+        if (b.linked_gnucash_acct.empty()) continue;
+        for (const auto& [name, bal] : accts)
         {
-            if (gnc_account_n_children(a) == 0)
-                total_assets += gnc_numeric_to_double(xaccAccountGetBalance(a));
+            if (name == b.linked_gnucash_acct)
+            {
+                b.approx_value = fmt_money_str(bal);
+                ++updated;
+                break;
+            }
         }
     }
-    g_list_free(all_accts);
+    if (updated > 0)
+    {
+        refresh_ben_store(priv);
+        save_estate_state(priv, true);
+    }
 
     if (priv->lbl_status)
     {
-        char buf[160];
+        char buf[192];
         std::snprintf(buf, sizeof(buf),
-                      _("Current GnuCash book liquid/investment/asset total: $%.0f"),
-                      total_assets);
+                      _("Synced %d linked row(s). GnuCash book asset total: %s"),
+                      updated, fmt_money_str(total_assets).c_str());
         gtk_label_set_text(priv->lbl_status, buf);
     }
 }
@@ -1324,6 +1842,130 @@ on_ice_delete_clicked(GtkButton*, gpointer user_data)
 }
 
 static void
+on_contact_selection_changed(GtkTreeSelection* sel, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    GtkTreeModel* model = nullptr;
+    GtkTreeIter iter;
+    if (gtk_tree_selection_get_selected(sel, &model, &iter))
+    {
+        gint idx = -1;
+        gtk_tree_model_get(model, &iter, 0, &idx, -1);
+        if (idx >= 0 && idx < static_cast<gint>(priv->contacts.size()))
+        {
+            priv->selected_contact_idx = idx;
+            const auto& c = priv->contacts[idx];
+            gtk_entry_set_text(priv->entry_ct_role, c.role.c_str());
+            gtk_entry_set_text(priv->entry_ct_name, c.name.c_str());
+            gtk_entry_set_text(priv->entry_ct_firm, c.firm_org.c_str());
+            gtk_entry_set_text(priv->entry_ct_phone, c.phone.c_str());
+            gtk_entry_set_text(priv->entry_ct_email, c.email.c_str());
+            gtk_entry_set_text(priv->entry_ct_notes, c.notes.c_str());
+        }
+    }
+}
+
+static void
+on_contact_update_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    if (priv->selected_contact_idx < 0 || priv->selected_contact_idx >= static_cast<gint>(priv->contacts.size()))
+        return;
+    auto& c = priv->contacts[priv->selected_contact_idx];
+    c.role = gtk_entry_get_text(priv->entry_ct_role);
+    c.name = gtk_entry_get_text(priv->entry_ct_name);
+    c.firm_org = gtk_entry_get_text(priv->entry_ct_firm);
+    c.phone = gtk_entry_get_text(priv->entry_ct_phone);
+    c.email = gtk_entry_get_text(priv->entry_ct_email);
+    c.notes = gtk_entry_get_text(priv->entry_ct_notes);
+    refresh_contact_store(priv);
+    save_estate_state(priv, true);
+}
+
+static void
+on_contact_add_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    FiduciaryContact c;
+    c.role = gtk_entry_get_text(priv->entry_ct_role);
+    if (c.role.empty()) c.role = "New Contact / Role";
+    c.name = gtk_entry_get_text(priv->entry_ct_name);
+    c.firm_org = gtk_entry_get_text(priv->entry_ct_firm);
+    c.phone = gtk_entry_get_text(priv->entry_ct_phone);
+    c.email = gtk_entry_get_text(priv->entry_ct_email);
+    c.notes = gtk_entry_get_text(priv->entry_ct_notes);
+    priv->contacts.push_back(std::move(c));
+    priv->selected_contact_idx = static_cast<int>(priv->contacts.size()) - 1;
+    refresh_contact_store(priv);
+    save_estate_state(priv, true);
+}
+
+static void
+on_contact_delete_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    if (priv->selected_contact_idx < 0 || priv->selected_contact_idx >= static_cast<gint>(priv->contacts.size()))
+        return;
+    priv->contacts.erase(priv->contacts.begin() + priv->selected_contact_idx);
+    priv->selected_contact_idx = -1;
+    refresh_contact_store(priv);
+    save_estate_state(priv, true);
+}
+
+static void
+on_ht_changed(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    recompute_heir_tax_estimator(priv);
+    save_estate_state(priv, false);
+}
+
+static void
+on_ht_pull_book_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    auto accts = collect_gnucash_asset_accounts();
+    double trad = 0.0, roth = 0.0;
+    for (const auto& [name, bal] : accts)
+    {
+        std::string low = name;
+        for (char& ch : low) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (low.find("roth") != std::string::npos)
+            roth += bal;
+        else if (low.find("401") != std::string::npos || low.find("403") != std::string::npos ||
+                 low.find("ira") != std::string::npos || low.find("457") != std::string::npos)
+            trad += bal;
+    }
+    if (priv->spin_ht_trad) gtk_spin_button_set_value(priv->spin_ht_trad, trad);
+    if (priv->spin_ht_roth) gtk_spin_button_set_value(priv->spin_ht_roth, roth);
+    recompute_heir_tax_estimator(priv);
+    save_estate_state(priv, true);
+    if (priv->lbl_status)
+    {
+        std::string msg = "Pulled from GnuCash book: Tax-Deferred " + fmt_money_str(trad) + ", Roth " + fmt_money_str(roth);
+        gtk_label_set_text(priv->lbl_status, msg.c_str());
+    }
+}
+
+static void
+on_stamp_audit_clicked(GtkButton*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    std::string today = today_iso_date();
+    if (priv->entry_last_audit)
+        gtk_entry_set_text(priv->entry_last_audit, today.c_str());
+    for (auto& b : priv->ben_rows)
+    {
+        if (b.verified)
+            b.last_verified_date = today;
+    }
+    refresh_ben_store(priv);
+    save_estate_state(priv, true);
+    if (priv->lbl_status)
+        gtk_label_set_text(priv->lbl_status, ("Stamped annual audit date: " + today).c_str());
+}
+
+static void
 on_export_html_clicked(GtkButton*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
@@ -1355,7 +1997,7 @@ on_export_html_clicked(GtkButton*, gpointer user_data)
               << " | <strong>Next Audit:</strong> " << html_escape(gtk_entry_get_text(priv->entry_next_audit)) << "</p>\n";
 
             auto emit_sec = [&](int sec, const char* heading) {
-                f << "<h2>" << heading << "</h2><table><tr><th>Status</th><th>Item</th><th>Trigger / Due</th><th>Owner</th><th>Date</th><th>Details</th></tr>\n";
+                f << "<h2>" << heading << "</h2><table><tr><th>Status</th><th>Item</th><th>Trigger / Due</th><th>Owner</th><th>Date</th><th>Details &amp; Document</th></tr>\n";
                 for (const auto& it : priv->items)
                 {
                     if (it.section != sec) continue;
@@ -1365,7 +2007,10 @@ on_export_html_clicked(GtkButton*, gpointer user_data)
                       << "<td>" << html_escape(it.due_trigger) << "</td>"
                       << "<td>" << html_escape(it.owner_agent) << "</td>"
                       << "<td>" << html_escape(it.completed_date) << "</td>"
-                      << "<td>" << html_escape(it.details) << "</td></tr>\n";
+                      << "<td>" << html_escape(it.details);
+                    if (!it.doc_path.empty())
+                        f << "<br><em>Doc: " << html_escape(it.doc_path) << "</em>";
+                    f << "</td></tr>\n";
                 }
                 f << "</table>\n";
             };
@@ -1401,6 +2046,19 @@ on_export_html_clicked(GtkButton*, gpointer user_data)
                   << "<td>" << html_escape(r.account_policy_id) << "</td>"
                   << "<td>" << html_escape(r.recovery_location) << "</td>"
                   << "<td>" << html_escape(r.notes) << "</td></tr>\n";
+            }
+            f << "</table>\n";
+
+            f << "<h2>Fiduciary &amp; Key Contacts Roster</h2><table>"
+              << "<tr><th>Role</th><th>Name</th><th>Firm / Org</th><th>Phone</th><th>Email</th><th>Notes</th></tr>\n";
+            for (const auto& c : priv->contacts)
+            {
+                f << "<tr><td><strong>" << html_escape(c.role) << "</strong></td>"
+                  << "<td>" << html_escape(c.name) << "</td>"
+                  << "<td>" << html_escape(c.firm_org) << "</td>"
+                  << "<td>" << html_escape(c.phone) << "</td>"
+                  << "<td>" << html_escape(c.email) << "</td>"
+                  << "<td>" << html_escape(c.notes) << "</td></tr>\n";
             }
             f << "</table></body></html>\n";
             if (priv->lbl_status)
@@ -1476,16 +2134,35 @@ static void
 on_reset_defaults_clicked(GtkButton*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
-    GtkWidget* dlg = gtk_message_dialog_new(
-        nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO,
-        _("Reset all estate checklist items, beneficiary audits, and ICE directory to the Florida Estate & Continuity template?"));
-    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_YES)
+    GtkWidget* dlg = gtk_dialog_new_with_buttons(
+        _("Load Estate Checklist Template"), nullptr, GTK_DIALOG_MODAL,
+        _("_Cancel"), GTK_RESPONSE_CANCEL,
+        _("Generic US Template"), 1,
+        _("Florida Template"), 2,
+        nullptr);
+    GtkWidget* area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    GtkWidget* lbl = gtk_label_new(
+        _("Choose a checklist template to load (replaces current checklist & beneficiary items):"));
+    gtk_container_set_border_width(GTK_CONTAINER(area), 12);
+    gtk_box_pack_start(GTK_BOX(area), lbl, FALSE, FALSE, 6);
+    gtk_widget_show_all(dlg);
+
+    int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+    if (resp == 2)
     {
         populate_default_florida_checklist(priv);
         refresh_all_views(priv);
         save_estate_state(priv, true);
         if (priv->lbl_status)
-            gtk_label_set_text(priv->lbl_status, _("Restored Florida Estate & Continuity Checklist template."));
+            gtk_label_set_text(priv->lbl_status, _("Loaded Florida Estate & Continuity template."));
+    }
+    else if (resp == 1)
+    {
+        populate_generic_us_template(priv, selected_state_name(priv));
+        refresh_all_views(priv);
+        save_estate_state(priv, true);
+        if (priv->lbl_status)
+            gtk_label_set_text(priv->lbl_status, _("Loaded Generic US Estate template."));
     }
     gtk_widget_destroy(dlg);
 }
@@ -1581,6 +2258,20 @@ build_checklist_section_tab(GncPluginPageEstatePrivate* priv, int sec)
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new(_("Guidance / Notes")), 0, 2, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), dsw, 1, 2, 5, 1);
 
+    tab.entry_doc = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(tab.entry_doc, _("Optional path to scanned PDF / document"));
+    gtk_widget_set_hexpand(GTK_WIDGET(tab.entry_doc), TRUE);
+    GtkWidget* b_doc_browse = gtk_button_new_with_label(_("Browse…"));
+    GtkWidget* b_doc_open   = gtk_button_new_with_label(_("Open"));
+    g_signal_connect(b_doc_browse, "clicked", G_CALLBACK(on_sec_browse_doc_clicked), pair);
+    g_signal_connect(b_doc_open, "clicked", G_CALLBACK(on_sec_open_doc_clicked), pair);
+    GtkWidget* doc_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_pack_start(GTK_BOX(doc_box), GTK_WIDGET(tab.entry_doc), TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(doc_box), b_doc_browse, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(doc_box), b_doc_open, FALSE, FALSE, 0);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new(_("Document Link")), 0, 3, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), doc_box, 1, 3, 5, 1);
+
     GtkWidget* bbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget* b_upd = gtk_button_new_with_label(_("Update Item"));
     GtkWidget* b_add = gtk_button_new_with_label(_("Add New Item"));
@@ -1591,7 +2282,7 @@ build_checklist_section_tab(GncPluginPageEstatePrivate* priv, int sec)
     gtk_box_pack_start(GTK_BOX(bbox), b_upd, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bbox), b_add, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bbox), b_del, FALSE, FALSE, 0);
-    gtk_grid_attach(GTK_GRID(grid), bbox, 1, 3, 5, 1);
+    gtk_grid_attach(GTK_GRID(grid), bbox, 1, 4, 5, 1);
 
     gtk_container_add(GTK_CONTAINER(frame), grid);
     gtk_box_pack_start(GTK_BOX(vbox), frame, FALSE, FALSE, 0);
@@ -1631,6 +2322,7 @@ gnc_plugin_page_estate_init(GncPluginPageEstate* page)
     new (&priv->items) std::vector<EstateChecklistItem>();
     new (&priv->ben_rows) std::vector<BeneficiaryAuditRow>();
     new (&priv->ice_rows) std::vector<IceDirectoryRow>();
+    new (&priv->contacts) std::vector<FiduciaryContact>();
 
     gnc_plugin_page_add_book(GNC_PLUGIN_PAGE(page), gnc_get_current_book());
 }
@@ -1644,6 +2336,7 @@ gnc_plugin_page_estate_finalize(GObject* object)
     priv->items.~vector();
     priv->ben_rows.~vector();
     priv->ice_rows.~vector();
+    priv->contacts.~vector();
     G_OBJECT_CLASS(gnc_plugin_page_estate_parent_class)->finalize(object);
 }
 
@@ -1666,9 +2359,11 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
                          _("<b>Florida Estate &amp; Continuity Tracker</b>"));
     gtk_box_pack_start(GTK_BOX(tbar), GTK_WIDGET(priv->lbl_header), FALSE, FALSE, 4);
 
+    GtkWidget* btn_audit = gtk_button_new_with_label(_("Audit Complete (Today)"));
     GtkWidget* btn_html = gtk_button_new_with_label(_("Export Binder Report (HTML)"));
     GtkWidget* btn_md = gtk_button_new_with_label(_("Export Checklist (Markdown)"));
-    GtkWidget* btn_reset = gtk_button_new_with_label(_("Reset Template"));
+    GtkWidget* btn_reset = gtk_button_new_with_label(_("Load Template…"));
+    g_signal_connect(btn_audit, "clicked", G_CALLBACK(on_stamp_audit_clicked), priv);
     g_signal_connect(btn_html, "clicked", G_CALLBACK(on_export_html_clicked), priv);
     g_signal_connect(btn_md, "clicked", G_CALLBACK(on_export_md_clicked), priv);
     g_signal_connect(btn_reset, "clicked", G_CALLBACK(on_reset_defaults_clicked), priv);
@@ -1679,6 +2374,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_box_pack_end(GTK_BOX(tbar), btn_reset, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(tbar), btn_md, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(tbar), btn_html, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(tbar), btn_audit, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(root), tbar, FALSE, FALSE, 0);
 
     GtkWidget* nb = gtk_notebook_new();
@@ -1758,9 +2454,14 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     // Tab 2: Account Titling & Beneficiary Audit
     GtkWidget* tab_ben = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_container_set_border_width(GTK_CONTAINER(tab_ben), 8);
-    priv->ben_store = gtk_list_store_new(8, G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING,
+    priv->lbl_ben_unmapped = GTK_LABEL(gtk_label_new(""));
+    gtk_label_set_line_wrap(priv->lbl_ben_unmapped, TRUE);
+    gtk_label_set_xalign(priv->lbl_ben_unmapped, 0.0f);
+    gtk_box_pack_start(GTK_BOX(tab_ben), GTK_WIDGET(priv->lbl_ben_unmapped), FALSE, FALSE, 0);
+
+    priv->ben_store = gtk_list_store_new(9, G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING,
                                          G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
-                                         G_TYPE_STRING, G_TYPE_STRING);
+                                         G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     priv->ben_tv = GTK_TREE_VIEW(gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->ben_store)));
     gtk_tree_view_set_grid_lines(priv->ben_tv, GTK_TREE_VIEW_GRID_LINES_HORIZONTAL);
     GtkCellRenderer* br_tog = gtk_cell_renderer_toggle_new();
@@ -1770,7 +2471,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     auto add_ben_col = [&](const char* title, int col_id, int w) {
         GtkCellRenderer* r = gtk_cell_renderer_text_new();
         g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, nullptr);
-        GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes(title, r, "text", col_id, nullptr);
+        GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes(title, r, "text", col_id, "foreground", 8, nullptr);
         gtk_tree_view_column_set_resizable(c, TRUE);
         gtk_tree_view_column_set_min_width(c, w);
         gtk_tree_view_append_column(priv->ben_tv, c);
@@ -1819,11 +2520,37 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(GTK_GRID(bgrid), gtk_label_new(_("Notes")), 0, 3, 1, 1);
     gtk_grid_attach(GTK_GRID(bgrid), GTK_WIDGET(priv->entry_ben_notes), 1, 3, 3, 1);
 
+    priv->combo_ben_gnc_acct = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(priv->combo_ben_gnc_acct, "(None / Manual)");
+    for (const auto& [name, bal] : collect_gnucash_asset_accounts())
+    {
+        (void)bal;
+        gtk_combo_box_text_append_text(priv->combo_ben_gnc_acct, name.c_str());
+    }
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ben_gnc_acct), 0);
+
+    priv->entry_ben_doc = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(priv->entry_ben_doc, _("Optional path to TOD/POD/Deed PDF"));
+    gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ben_doc), TRUE);
+    GtkWidget* bb_doc_br = gtk_button_new_with_label(_("Browse…"));
+    GtkWidget* bb_doc_op = gtk_button_new_with_label(_("Open"));
+    g_signal_connect(bb_doc_br, "clicked", G_CALLBACK(on_ben_browse_doc_clicked), priv);
+    g_signal_connect(bb_doc_op, "clicked", G_CALLBACK(on_ben_open_doc_clicked), priv);
+    GtkWidget* bdoc_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_pack_start(GTK_BOX(bdoc_box), GTK_WIDGET(priv->entry_ben_doc), TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(bdoc_box), bb_doc_br, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bdoc_box), bb_doc_op, FALSE, FALSE, 0);
+
+    gtk_grid_attach(GTK_GRID(bgrid), gtk_label_new(_("GnuCash Account Link")), 0, 4, 1, 1);
+    gtk_grid_attach(GTK_GRID(bgrid), GTK_WIDGET(priv->combo_ben_gnc_acct), 1, 4, 1, 1);
+    gtk_grid_attach(GTK_GRID(bgrid), gtk_label_new(_("Document Link")), 2, 4, 1, 1);
+    gtk_grid_attach(GTK_GRID(bgrid), bdoc_box, 3, 4, 1, 1);
+
     GtkWidget* ben_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget* bb_upd = gtk_button_new_with_label(_("Update Row"));
     GtkWidget* bb_add = gtk_button_new_with_label(_("Add Asset / Account"));
     GtkWidget* bb_del = gtk_button_new_with_label(_("Delete Row"));
-    GtkWidget* bb_sync = gtk_button_new_with_label(_("Check GnuCash Book Total"));
+    GtkWidget* bb_sync = gtk_button_new_with_label(_("Sync Linked GnuCash Values"));
     g_signal_connect(bb_upd, "clicked", G_CALLBACK(on_ben_update_clicked), priv);
     g_signal_connect(bb_add, "clicked", G_CALLBACK(on_ben_add_clicked), priv);
     g_signal_connect(bb_del, "clicked", G_CALLBACK(on_ben_delete_clicked), priv);
@@ -1832,7 +2559,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_box_pack_start(GTK_BOX(ben_btns), bb_add, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(ben_btns), bb_del, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(ben_btns), bb_sync, FALSE, FALSE, 0);
-    gtk_grid_attach(GTK_GRID(bgrid), ben_btns, 1, 4, 3, 1);
+    gtk_grid_attach(GTK_GRID(bgrid), ben_btns, 1, 5, 3, 1);
     gtk_container_add(GTK_CONTAINER(ben_frame), bgrid);
     gtk_box_pack_start(GTK_BOX(tab_ben), ben_frame, FALSE, FALSE, 0);
 
@@ -1915,6 +2642,130 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
 
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ice, gtk_label_new(_("5. ICE Directory")));
 
+    // Tab 6: Fiduciary & Key Contacts Roster
+    GtkWidget* tab_ct = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_set_border_width(GTK_CONTAINER(tab_ct), 8);
+    priv->contact_store = gtk_list_store_new(7, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    priv->contact_tv = GTK_TREE_VIEW(gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->contact_store)));
+    gtk_tree_view_set_grid_lines(priv->contact_tv, GTK_TREE_VIEW_GRID_LINES_HORIZONTAL);
+    auto add_ct_col = [&](const char* title, int col_id, int w) {
+        GtkCellRenderer* r = gtk_cell_renderer_text_new();
+        g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, nullptr);
+        GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes(title, r, "text", col_id, nullptr);
+        gtk_tree_view_column_set_resizable(c, TRUE);
+        gtk_tree_view_column_set_min_width(c, w);
+        gtk_tree_view_append_column(priv->contact_tv, c);
+    };
+    add_ct_col(_("Fiduciary / Role"), 1, 200);
+    add_ct_col(_("Name"), 2, 160);
+    add_ct_col(_("Firm / Organization"), 3, 160);
+    add_ct_col(_("Phone"), 4, 120);
+    add_ct_col(_("Email"), 5, 160);
+    add_ct_col(_("Notes"), 6, 180);
+    g_signal_connect(gtk_tree_view_get_selection(priv->contact_tv), "changed",
+                     G_CALLBACK(on_contact_selection_changed), priv);
+    GtkWidget* ct_sw = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ct_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ct_sw), 220);
+    gtk_container_add(GTK_CONTAINER(ct_sw), GTK_WIDGET(priv->contact_tv));
+    gtk_box_pack_start(GTK_BOX(tab_ct), ct_sw, TRUE, TRUE, 0);
+
+    GtkWidget* ct_frame = gtk_frame_new(_("Edit Contact / Fiduciary"));
+    GtkWidget* cgrid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(cgrid), 4);
+    gtk_grid_set_column_spacing(GTK_GRID(cgrid), 8);
+    gtk_container_set_border_width(GTK_CONTAINER(cgrid), 6);
+    priv->entry_ct_role  = GTK_ENTRY(gtk_entry_new());
+    priv->entry_ct_name  = GTK_ENTRY(gtk_entry_new());
+    priv->entry_ct_firm  = GTK_ENTRY(gtk_entry_new());
+    priv->entry_ct_phone = GTK_ENTRY(gtk_entry_new());
+    priv->entry_ct_email = GTK_ENTRY(gtk_entry_new());
+    priv->entry_ct_notes = GTK_ENTRY(gtk_entry_new());
+    gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ct_role), TRUE);
+    gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ct_name), TRUE);
+    gtk_grid_attach(GTK_GRID(cgrid), gtk_label_new(_("Role")), 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), GTK_WIDGET(priv->entry_ct_role), 1, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), gtk_label_new(_("Name")), 2, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), GTK_WIDGET(priv->entry_ct_name), 3, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), gtk_label_new(_("Firm / Org")), 0, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), GTK_WIDGET(priv->entry_ct_firm), 1, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), gtk_label_new(_("Phone")), 2, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), GTK_WIDGET(priv->entry_ct_phone), 3, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), gtk_label_new(_("Email")), 0, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), GTK_WIDGET(priv->entry_ct_email), 1, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), gtk_label_new(_("Notes")), 2, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(cgrid), GTK_WIDGET(priv->entry_ct_notes), 3, 2, 1, 1);
+    GtkWidget* ct_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget* cb_upd = gtk_button_new_with_label(_("Update Contact"));
+    GtkWidget* cb_add = gtk_button_new_with_label(_("Add Contact"));
+    GtkWidget* cb_del = gtk_button_new_with_label(_("Delete Contact"));
+    g_signal_connect(cb_upd, "clicked", G_CALLBACK(on_contact_update_clicked), priv);
+    g_signal_connect(cb_add, "clicked", G_CALLBACK(on_contact_add_clicked), priv);
+    g_signal_connect(cb_del, "clicked", G_CALLBACK(on_contact_delete_clicked), priv);
+    gtk_box_pack_start(GTK_BOX(ct_btns), cb_upd, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ct_btns), cb_add, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ct_btns), cb_del, FALSE, FALSE, 0);
+    gtk_grid_attach(GTK_GRID(cgrid), ct_btns, 1, 3, 3, 1);
+    gtk_container_add(GTK_CONTAINER(ct_frame), cgrid);
+    gtk_box_pack_start(GTK_BOX(tab_ct), ct_frame, FALSE, FALSE, 0);
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ct, gtk_label_new(_("6. Contacts & Fiduciaries")));
+
+    // Tab 7: Heir 10-Yr Tax Estimator (SECURE Act)
+    GtkWidget* tab_ht = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(tab_ht), 8);
+    GtkWidget* ht_frame = gtk_frame_new(_("SECURE Act 10-Year Inherited Account Tax Estimator"));
+    GtkWidget* hgrid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(hgrid), 6);
+    gtk_grid_set_column_spacing(GTK_GRID(hgrid), 10);
+    gtk_container_set_border_width(GTK_CONTAINER(hgrid), 8);
+
+    auto make_spin = [&](double val, double lo, double hi, double step) {
+        GtkSpinButton* s = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(lo, hi, step));
+        gtk_spin_button_set_value(s, val);
+        g_signal_connect(s, "value-changed", G_CALLBACK(on_ht_changed), priv);
+        return s;
+    };
+    priv->spin_ht_trad   = make_spin(1729711.0, 0.0, 50000000.0, 10000.0);
+    priv->spin_ht_roth   = make_spin(54100.0, 0.0, 50000000.0, 5000.0);
+    priv->spin_ht_heirs  = make_spin(2.0, 1.0, 20.0, 1.0);
+    gtk_spin_button_set_digits(priv->spin_ht_heirs, 0);
+    priv->spin_ht_rate   = make_spin(24.0, 0.0, 60.0, 1.0);
+    priv->spin_ht_growth = make_spin(6.0, 0.0, 15.0, 0.5);
+    priv->combo_ht_strategy = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(priv->combo_ht_strategy, _("Even 10-Year Spread"));
+    gtk_combo_box_text_append_text(priv->combo_ht_strategy, _("Year-10 Lump Sum (Max Deferral)"));
+    gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ht_strategy), 0);
+    g_signal_connect(priv->combo_ht_strategy, "changed", G_CALLBACK(on_ht_changed), priv);
+
+    GtkWidget* btn_ht_pull = gtk_button_new_with_label(_("Pull IRA/401k/Roth from GnuCash Book"));
+    g_signal_connect(btn_ht_pull, "clicked", G_CALLBACK(on_ht_pull_book_clicked), priv);
+
+    gtk_grid_attach(GTK_GRID(hgrid), gtk_label_new(_("Inherited Tax-Deferred ($)")), 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), GTK_WIDGET(priv->spin_ht_trad), 1, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), gtk_label_new(_("Inherited Roth ($)")), 2, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), GTK_WIDGET(priv->spin_ht_roth), 3, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), gtk_label_new(_("Number of Heirs")), 0, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), GTK_WIDGET(priv->spin_ht_heirs), 1, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), gtk_label_new(_("Heir Marginal Tax Rate (%)")), 2, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), GTK_WIDGET(priv->spin_ht_rate), 3, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), gtk_label_new(_("10-Yr Growth Rate (%/yr)")), 0, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), GTK_WIDGET(priv->spin_ht_growth), 1, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), gtk_label_new(_("Distribution Pattern")), 2, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), GTK_WIDGET(priv->combo_ht_strategy), 3, 2, 1, 1);
+    gtk_grid_attach(GTK_GRID(hgrid), btn_ht_pull, 0, 3, 4, 1);
+    gtk_container_add(GTK_CONTAINER(ht_frame), hgrid);
+    gtk_box_pack_start(GTK_BOX(tab_ht), ht_frame, FALSE, FALSE, 0);
+
+    priv->tv_ht_report = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(priv->tv_ht_report, FALSE);
+    gtk_text_view_set_monospace(priv->tv_ht_report, TRUE);
+    GtkWidget* ht_sw = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ht_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(ht_sw), GTK_WIDGET(priv->tv_ht_report));
+    gtk_box_pack_start(GTK_BOX(tab_ht), ht_sw, TRUE, TRUE, 0);
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ht, gtk_label_new(_("7. Heir 10-Yr Tax")));
+
     gtk_box_pack_start(GTK_BOX(root), nb, TRUE, TRUE, 0);
     gtk_widget_show_all(root);
 
@@ -1953,8 +2804,10 @@ gnc_plugin_page_estate_destroy_widget(GncPluginPage* plugin_page)
         }
         if (priv->ben_store) g_object_unref(priv->ben_store);
         if (priv->ice_store) g_object_unref(priv->ice_store);
+        if (priv->contact_store) g_object_unref(priv->contact_store);
         priv->ben_store = nullptr;
         priv->ice_store = nullptr;
+        priv->contact_store = nullptr;
         priv->root_widget = nullptr;
     }
 }
