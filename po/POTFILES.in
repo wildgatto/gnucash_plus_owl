@@ -104,6 +104,7 @@ gnucash/gnome/gnc-plugin-page-register.cpp
 gnucash/gnome/gnc-plugin-page-register-filter.cpp
 gnucash/gnome/gnc-plugin-page-register-sort.cpp
 gnucash/gnome/gnc-plugin-page-report.cpp
+gnucash/gnome/gnc-plugin-page-estate.cpp
 gnucash/gnome/gnc-plugin-page-retirement.cpp
 gnucash/gnome/gnc-plugin-page-sx-list.cpp
 gnucash/gnome/gnc-plugin-register.c
