@@ -76,6 +76,7 @@ enum
 {
     COL_YEAR = 0,
     COL_AGE,
+    COL_SPOUSE_AGE,
     COL_TOTAL,
     COL_TAXABLE,
     COL_TAX_DEF,
@@ -242,6 +243,7 @@ struct GncPluginPageRetirementPrivate
     double chart_hover_x = 0.0;
     double chart_hover_y = 0.0;
     GtkListStore* sched_store = nullptr;
+    GtkTreeViewColumn* sched_cols[NUM_SCHED_COLS] = {};
     GtkListStore* cmp_store = nullptr;
     GtkListStore* acct_store = nullptr;
     GtkTreeModelFilter* acct_filter = nullptr;
@@ -480,6 +482,83 @@ refresh_accounts_from_book(GncPluginPageRetirementPrivate* priv)
     sync_acct_store_from_accounts(priv);
 }
 
+static std::string
+format_bucket_accounts_tooltip(GncPluginPageRetirementPrivate* priv,
+                               int sched_col)
+{
+    auto list_bucket = [&](TaxBucket target, const char* heading) -> std::string {
+        std::string out = heading;
+        int count = 0;
+        for (const auto& a : priv->accounts)
+        {
+            if (!a.included || a.bucket != target) continue;
+            out += "\n• " + a.full_name + " (" + fmt_currency(a.balance) + ")";
+            ++count;
+        }
+        if (count == 0)
+            out += "\n• (No included accounts mapped)";
+        return out;
+    };
+
+    switch (sched_col)
+    {
+        case COL_TOTAL:
+        {
+            std::string out = "All Included Portfolio Accounts:";
+            int count = 0;
+            for (const auto& a : priv->accounts)
+            {
+                if (!a.included || a.bucket == TaxBucket::Excluded) continue;
+                out += "\n• [" + std::string(bucket_label(a.bucket)) + "] " + a.full_name + " (" + fmt_currency(a.balance) + ")";
+                ++count;
+            }
+            if (count == 0) out += "\n• (No included accounts mapped)";
+            return out;
+        }
+        case COL_TAXABLE:
+        case COL_RMD_REINV:
+            return list_bucket(TaxBucket::Taxable, "Taxable Brokerage / Cash Accounts:");
+        case COL_TAX_DEF:
+        case COL_RMD:
+        case COL_ROTH_CONV:
+            return list_bucket(TaxBucket::TaxDeferred, "401k / IRA (Tax-Deferred) Accounts:");
+        case COL_ROTH:
+            return list_bucket(TaxBucket::TaxFree, "Roth (Tax-Free) Accounts:");
+        case COL_HSA:
+            return list_bucket(TaxBucket::HSA, "HSA Accounts:");
+        default:
+            return "";
+    }
+}
+
+static gboolean
+on_sched_query_tooltip(GtkWidget* widget, gint x, gint y, gboolean keyboard_tip,
+                       GtkTooltip* tooltip, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    GtkTreeView* tv = GTK_TREE_VIEW(widget);
+    GtkTreeModel* model = nullptr;
+    GtkTreePath* path = nullptr;
+    GtkTreeIter iter;
+    if (!gtk_tree_view_get_tooltip_context(tv, &x, &y, keyboard_tip, &model, &path, &iter))
+        return FALSE;
+
+    GtkTreeViewColumn* col = nullptr;
+    gint bx = x, by = y;
+    if (!keyboard_tip)
+        gtk_tree_view_get_path_at_pos(tv, bx, by, nullptr, &col, nullptr, nullptr);
+    gtk_tree_path_free(path);
+    if (!col)
+        return FALSE;
+
+    int col_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(col), "sched_col_idx"));
+    std::string tip = format_bucket_accounts_tooltip(priv, col_idx);
+    if (tip.empty())
+        return FALSE;
+    gtk_tooltip_set_text(tooltip, tip.c_str());
+    return TRUE;
+}
+
 static void
 populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
 {
@@ -487,11 +566,31 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
     const bool use_real = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->chk_real_dollars));
     const double inf_rate = priv->last_input.inflation;
 
+    for (int c = 0; c < NUM_SCHED_COLS; ++c)
+    {
+        if (!priv->sched_cols[c]) continue;
+        GtkWidget* btn = gtk_tree_view_column_get_button(priv->sched_cols[c]);
+        if (btn)
+        {
+            std::string tip = format_bucket_accounts_tooltip(priv, c);
+            gtk_widget_set_tooltip_text(btn, tip.empty() ? nullptr : tip.c_str());
+        }
+    }
+
     gtk_list_store_clear(priv->sched_store);
     for (size_t i = 0; i < res.schedule.size(); ++i)
     {
         const auto& yp = res.schedule[i];
         const double div = use_real ? std::pow(1.0 + inf_rate, static_cast<double>(i)) : 1.0;
+
+        std::string sp_age_str = "-";
+        if (priv->last_input.has_spouse)
+        {
+            int sp_age = priv->last_input.spouse_current_age + static_cast<int>(i);
+            sp_age_str = (sp_age <= priv->last_input.spouse_horizon_age)
+                       ? std::to_string(sp_age)
+                       : "—";
+        }
 
         char brk_buf[32];
         if (yp.irmaa_tier > 0)
@@ -506,6 +605,7 @@ populate_schedule_and_comparison(GncPluginPageRetirementPrivate* priv)
         gtk_list_store_set(priv->sched_store, &iter,
                            COL_YEAR, yp.year,
                            COL_AGE, yp.age,
+                           COL_SPOUSE_AGE, sp_age_str.c_str(),
                            COL_TOTAL, fmt_table_dollar(yp.end_total_nominal / div).c_str(),
                            COL_TAXABLE, fmt_table_dollar(yp.end_taxable / div).c_str(),
                            COL_TAX_DEF, fmt_table_dollar(yp.end_tax_deferred / div).c_str(),
@@ -4023,28 +4123,32 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
 
     // Tab 2: Year-by-Year Schedule
     priv->sched_store = gtk_list_store_new(NUM_SCHED_COLS,
-        G_TYPE_INT, G_TYPE_INT,
+        G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING,
         G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
         G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
         G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     GtkWidget* sched_tv = gtk_tree_view_new_with_model(GTK_TREE_MODEL(priv->sched_store));
+    gtk_widget_set_has_tooltip(sched_tv, TRUE);
+    g_signal_connect(sched_tv, "query-tooltip", G_CALLBACK(on_sched_query_tooltip), priv);
     const char* sched_titles[] = {
-        "Year", "Age", "Total", "Taxable", "401k/IRA", "Roth",
+        "Year", "Age", "Spouse Age", "Total", "Taxable", "401k/IRA", "Roth",
         "HSA", "SS+Pens", "RMD", "Roth Conv", "Tax", "Net Spend",
         "Floor Gap", "RMD Reinv", "Bracket / IRMAA"
     };
     for (int c = 0; c < NUM_SCHED_COLS; ++c)
     {
-        if (c >= 2 && c <= 13)
+        if (c >= 2 && c <= 14)
             gtk_tree_sortable_set_sort_func(GTK_TREE_SORTABLE(priv->sched_store), c,
                                             cmp_ret_currency_or_text, GINT_TO_POINTER(c), nullptr);
         GtkCellRenderer* rend = gtk_cell_renderer_text_new();
-        g_object_set(rend, "xalign", (c >= 2) ? 1.0f : 0.5f, nullptr);
+        g_object_set(rend, "xalign", (c >= 3) ? 1.0f : 0.5f, nullptr);
         GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(
             sched_titles[c], rend, "text", c, nullptr);
+        g_object_set_data(G_OBJECT(col), "sched_col_idx", GINT_TO_POINTER(c));
         gtk_tree_view_column_set_resizable(col, TRUE);
         gtk_tree_view_column_set_sort_column_id(col, c);
         gtk_tree_view_append_column(GTK_TREE_VIEW(sched_tv), col);
+        priv->sched_cols[c] = col;
     }
     GtkWidget* sched_scroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sched_scroll),
