@@ -28,6 +28,7 @@
 
 #include <gtk/gtk.h>
 #include <glib/gi18n.h>
+#include <glib/gstdio.h>
 #include <cairo.h>
 #include <libsoup/soup.h>
 
@@ -40,6 +41,7 @@
 #include <vector>
 
 #include "Account.h"
+#include "gnc-filepath-utils.h"
 #include "gnc-gobject-utils.h"
 #include "gnc-icons.h"
 #include "gnc-plugin-page-retirement.h"
@@ -276,6 +278,7 @@ struct GncPluginPageRetirementPrivate
     GtkWidget* btn_ai_stop = nullptr;
     SoupSession* soup_session = nullptr;
     GCancellable* ai_cancel = nullptr;
+    bool updating_ai_ui = false;
     bool has_ai_suggestion = false;
     PlanInput ai_suggested_input;
 };
@@ -864,6 +867,246 @@ static constexpr const char* STATE_GROUP_PLAN = "RetirementPlanner";
 static constexpr const char* STATE_GROUP_ACCTS = "RetirementPlannerAccounts";
 static constexpr const char* STATE_GROUP_EXCLUDED = "RetirementPlannerExcluded";
 static constexpr const char* STATE_GROUP_EVENTS = "RetirementPlannerEvents";
+static constexpr const char* STATE_GROUP_AI = "RetirementAI";
+
+static std::string
+ai_config_file_path()
+{
+    gchar* p = gnc_build_userdata_path("retirement-ai.conf");
+    std::string out = p ? p : "";
+    g_free(p);
+    return out;
+}
+
+static void
+write_ai_settings_to_keyfile(GncPluginPageRetirementPrivate* priv, GKeyFile* kf, const char* group)
+{
+    if (!priv || !kf || !group)
+        return;
+    int p_idx = priv->combo_ai_provider
+              ? std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2)
+              : 0;
+    g_key_file_set_integer(kf, group, "ai_provider", p_idx);
+
+    auto set_str = [&](const char* key, const char* per_prov_prefix, const char* val) {
+        const char* s = val ? val : "";
+        g_key_file_set_string(kf, group, key, s);
+        if (per_prov_prefix)
+        {
+            std::string pk = std::string(per_prov_prefix) + "_" + std::to_string(p_idx);
+            g_key_file_set_string(kf, group, pk.c_str(), s);
+        }
+    };
+
+    if (priv->entry_ai_endpoint)
+        set_str("ai_endpoint", "ai_endpoint", gtk_entry_get_text(priv->entry_ai_endpoint));
+    if (priv->entry_ai_model)
+        set_str("ai_model", "ai_model", gtk_entry_get_text(priv->entry_ai_model));
+    if (priv->entry_ai_key)
+        set_str("ai_api_key", "ai_api_key", gtk_entry_get_text(priv->entry_ai_key));
+
+    if (priv->combo_ai_prompt)
+        g_key_file_set_integer(kf, group, "ai_prompt_preset",
+                               gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_prompt)));
+    if (priv->tv_ai_system)
+    {
+        GtkTextBuffer* sbuf = gtk_text_view_get_buffer(priv->tv_ai_system);
+        GtkTextIter s0, s1;
+        gtk_text_buffer_get_bounds(sbuf, &s0, &s1);
+        gchar* stxt = gtk_text_buffer_get_text(sbuf, &s0, &s1, FALSE);
+        if (stxt)
+        {
+            g_key_file_set_string(kf, group, "ai_system_prompt", stxt);
+            g_free(stxt);
+        }
+    }
+}
+
+static void
+save_ai_settings(GncPluginPageRetirementPrivate* priv, bool flush_book_state = false)
+{
+    if (!priv || !priv->root_widget || priv->updating_ai_ui)
+        return;
+
+    std::string cfg_path = ai_config_file_path();
+    if (!cfg_path.empty())
+    {
+        GKeyFile* kf = g_key_file_new();
+        g_key_file_load_from_file(kf, cfg_path.c_str(), G_KEY_FILE_KEEP_COMMENTS, nullptr);
+        write_ai_settings_to_keyfile(priv, kf, STATE_GROUP_AI);
+        if (gchar* dir = g_path_get_dirname(cfg_path.c_str()))
+        {
+            g_mkdir_with_parents(dir, 0700);
+            g_free(dir);
+        }
+        g_key_file_save_to_file(kf, cfg_path.c_str(), nullptr);
+        g_chmod(cfg_path.c_str(), 0600);
+        g_key_file_free(kf);
+    }
+
+    if (GKeyFile* state = gnc_state_get_current())
+    {
+        write_ai_settings_to_keyfile(priv, state, STATE_GROUP_PLAN);
+        if (flush_book_state && gnc_current_session_exist())
+        {
+            if (QofSession* sess = gnc_get_current_session())
+                gnc_state_save(sess);
+        }
+    }
+}
+
+static void
+populate_ai_model_list(GncPluginPageRetirementPrivate* priv,
+                       const std::vector<std::string>& models,
+                       const char* preferred = nullptr);
+
+static void
+apply_provider_defaults(GncPluginPageRetirementPrivate* priv, int idx)
+{
+    if (!priv)
+        return;
+    if (idx == 0)
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/chat");
+        populate_ai_model_list(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
+    }
+    else if (idx == 1)
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "https://generativelanguage.googleapis.com/v1beta");
+        populate_ai_model_list(priv, {"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"}, "gemini-2.5-flash");
+    }
+    else
+    {
+        gtk_entry_set_text(priv->entry_ai_endpoint, "https://api.openai.com/v1/chat/completions");
+        populate_ai_model_list(priv, {"gpt-4o-mini", "gpt-4o", "o3-mini"}, "gpt-4o-mini");
+    }
+
+    std::string cfg_path = ai_config_file_path();
+    GKeyFile* kf_file = g_key_file_new();
+    bool has_file = !cfg_path.empty() &&
+                    g_key_file_load_from_file(kf_file, cfg_path.c_str(), G_KEY_FILE_NONE, nullptr);
+    GKeyFile* kf_book = gnc_state_get_current();
+
+    auto read_per_prov = [&](const char* prefix) -> std::string {
+        std::string key = std::string(prefix) + "_" + std::to_string(idx);
+        if (has_file)
+        {
+            if (gchar* v = g_key_file_get_string(kf_file, STATE_GROUP_AI, key.c_str(), nullptr))
+            {
+                std::string s(v);
+                g_free(v);
+                return s;
+            }
+        }
+        if (kf_book)
+        {
+            if (gchar* v = g_key_file_get_string(kf_book, STATE_GROUP_PLAN, key.c_str(), nullptr))
+            {
+                std::string s(v);
+                g_free(v);
+                return s;
+            }
+        }
+        return {};
+    };
+
+    std::string ep = read_per_prov("ai_endpoint");
+    if (!ep.empty() && priv->entry_ai_endpoint)
+        gtk_entry_set_text(priv->entry_ai_endpoint, ep.c_str());
+
+    std::string md = read_per_prov("ai_model");
+    if (!md.empty() && priv->entry_ai_model)
+        gtk_entry_set_text(priv->entry_ai_model, md.c_str());
+
+    std::string ak = read_per_prov("ai_api_key");
+    if (priv->entry_ai_key)
+        gtk_entry_set_text(priv->entry_ai_key, ak.c_str());
+
+    g_key_file_free(kf_file);
+}
+
+static void
+load_ai_settings(GncPluginPageRetirementPrivate* priv)
+{
+    if (!priv || !priv->root_widget)
+        return;
+
+    std::string cfg_path = ai_config_file_path();
+    GKeyFile* kf_file = g_key_file_new();
+    bool has_file = !cfg_path.empty() &&
+                    g_key_file_load_from_file(kf_file, cfg_path.c_str(), G_KEY_FILE_NONE, nullptr);
+    GKeyFile* kf_book = gnc_state_get_current();
+
+    auto read_int = [&](const char* key, int def) -> int {
+        if (has_file && g_key_file_has_key(kf_file, STATE_GROUP_AI, key, nullptr))
+        {
+            GError* err = nullptr;
+            int v = g_key_file_get_integer(kf_file, STATE_GROUP_AI, key, &err);
+            if (!err) return v;
+            g_error_free(err);
+        }
+        if (kf_book && g_key_file_has_key(kf_book, STATE_GROUP_PLAN, key, nullptr))
+        {
+            GError* err = nullptr;
+            int v = g_key_file_get_integer(kf_book, STATE_GROUP_PLAN, key, &err);
+            if (!err) return v;
+            g_error_free(err);
+        }
+        return def;
+    };
+
+    auto read_str = [&](const char* key) -> std::string {
+        if (has_file)
+        {
+            if (gchar* v = g_key_file_get_string(kf_file, STATE_GROUP_AI, key, nullptr))
+            {
+                std::string s(v);
+                g_free(v);
+                if (!s.empty()) return s;
+            }
+        }
+        if (kf_book)
+        {
+            if (gchar* v = g_key_file_get_string(kf_book, STATE_GROUP_PLAN, key, nullptr))
+            {
+                std::string s(v);
+                g_free(v);
+                if (!s.empty()) return s;
+            }
+        }
+        return {};
+    };
+
+    priv->updating_ai_ui = true;
+
+    int p_idx = std::clamp(read_int("ai_provider", 0), 0, 2);
+    if (priv->combo_ai_provider)
+        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_provider), p_idx);
+    apply_provider_defaults(priv, p_idx);
+
+    std::string ep = read_str("ai_endpoint");
+    if (!ep.empty() && priv->entry_ai_endpoint)
+        gtk_entry_set_text(priv->entry_ai_endpoint, ep.c_str());
+
+    std::string md = read_str("ai_model");
+    if (!md.empty() && priv->entry_ai_model)
+        gtk_entry_set_text(priv->entry_ai_model, md.c_str());
+
+    std::string ak = read_str("ai_api_key");
+    if (!ak.empty() && priv->entry_ai_key)
+        gtk_entry_set_text(priv->entry_ai_key, ak.c_str());
+
+    if (priv->combo_ai_prompt)
+        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_prompt),
+                                 std::clamp(read_int("ai_prompt_preset", 0), 0, 4));
+
+    std::string sp = read_str("ai_system_prompt");
+    if (!sp.empty() && priv->tv_ai_system)
+        gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system), sp.c_str(), -1);
+
+    priv->updating_ai_ui = false;
+    g_key_file_free(kf_file);
+}
 
 static void
 save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = true)
@@ -958,30 +1201,8 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
     else
         g_key_file_remove_key(state, STATE_GROUP_PLAN, "last_owlplan_path", nullptr);
 
-    if (priv->combo_ai_provider)
-        g_key_file_set_integer(state, STATE_GROUP_PLAN, "ai_provider",
-                               gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)));
-    if (priv->entry_ai_endpoint)
-        g_key_file_set_string(state, STATE_GROUP_PLAN, "ai_endpoint",
-                              gtk_entry_get_text(priv->entry_ai_endpoint));
-    if (priv->entry_ai_model)
-        g_key_file_set_string(state, STATE_GROUP_PLAN, "ai_model",
-                              gtk_entry_get_text(priv->entry_ai_model));
-    if (priv->combo_ai_prompt)
-        g_key_file_set_integer(state, STATE_GROUP_PLAN, "ai_prompt_preset",
-                               gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_prompt)));
-    if (priv->tv_ai_system)
-    {
-        GtkTextBuffer* sbuf = gtk_text_view_get_buffer(priv->tv_ai_system);
-        GtkTextIter s0, s1;
-        gtk_text_buffer_get_bounds(sbuf, &s0, &s1);
-        gchar* stxt = gtk_text_buffer_get_text(sbuf, &s0, &s1, FALSE);
-        if (stxt)
-        {
-            g_key_file_set_string(state, STATE_GROUP_PLAN, "ai_system_prompt", stxt);
-            g_free(stxt);
-        }
-    }
+    write_ai_settings_to_keyfile(priv, state, STATE_GROUP_PLAN);
+    save_ai_settings(priv, false);
 
     g_key_file_remove_group(state, STATE_GROUP_ACCTS, nullptr);
     g_key_file_remove_group(state, STATE_GROUP_EXCLUDED, nullptr);
@@ -1034,6 +1255,8 @@ save_state_to_book(GncPluginPageRetirementPrivate* priv, bool flush_to_disk = tr
 static void
 load_state_from_book(GncPluginPageRetirementPrivate* priv)
 {
+    load_ai_settings(priv);
+
     GKeyFile* state = gnc_state_get_current();
     if (!state || !g_key_file_has_group(state, STATE_GROUP_PLAN))
         return;
@@ -1203,40 +1426,6 @@ load_state_from_book(GncPluginPageRetirementPrivate* priv)
     gtk_toggle_button_set_active(priv->btn_toggle_params, show_params);
     if (priv->left_panel)
         gtk_widget_set_visible(priv->left_panel, show_params);
-
-    if (priv->combo_ai_provider)
-        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_provider),
-                                 std::clamp(get_int("ai_provider", 0), 0, 2));
-    if (priv->entry_ai_endpoint)
-    {
-        if (gchar* ep = g_key_file_get_string(state, STATE_GROUP_PLAN, "ai_endpoint", nullptr))
-        {
-            if (ep[0] != '\0')
-                gtk_entry_set_text(priv->entry_ai_endpoint, ep);
-            g_free(ep);
-        }
-    }
-    if (priv->entry_ai_model)
-    {
-        if (gchar* md = g_key_file_get_string(state, STATE_GROUP_PLAN, "ai_model", nullptr))
-        {
-            if (md[0] != '\0')
-                gtk_entry_set_text(priv->entry_ai_model, md);
-            g_free(md);
-        }
-    }
-    if (priv->combo_ai_prompt)
-        gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_prompt),
-                                 std::clamp(get_int("ai_prompt_preset", 0), 0, 4));
-    if (priv->tv_ai_system)
-    {
-        if (gchar* sp = g_key_file_get_string(state, STATE_GROUP_PLAN, "ai_system_prompt", nullptr))
-        {
-            if (sp[0] != '\0')
-                gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system), sp, -1);
-            g_free(sp);
-        }
-    }
 
     if (g_key_file_has_group(state, STATE_GROUP_ACCTS))
     {
@@ -2275,9 +2464,45 @@ on_ai_prompt_preset_changed(GtkComboBox*, gpointer user_data)
     int idx = gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_prompt));
     if (idx >= 0 && idx <= 3)
     {
+        bool prev_updating = priv->updating_ai_ui;
+        priv->updating_ai_ui = true;
         gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system),
                                  ai_preset_text(idx), -1);
+        priv->updating_ai_ui = prev_updating;
     }
+    save_ai_settings(priv, false);
+}
+
+static void
+on_ai_setting_changed(GtkWidget*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    save_ai_settings(priv, false);
+}
+
+static void
+on_ai_system_prompt_changed(GtkTextBuffer*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
+    if (!priv->updating_ai_ui && priv->combo_ai_prompt)
+    {
+        int idx = gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_prompt));
+        if (idx >= 0 && idx <= 3)
+        {
+            GtkTextBuffer* sbuf = gtk_text_view_get_buffer(priv->tv_ai_system);
+            GtkTextIter s0, s1;
+            gtk_text_buffer_get_bounds(sbuf, &s0, &s1);
+            gchar* stxt = gtk_text_buffer_get_text(sbuf, &s0, &s1, FALSE);
+            if (stxt && std::strcmp(stxt, ai_preset_text(idx)) != 0)
+            {
+                priv->updating_ai_ui = true;
+                gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ai_prompt), 4);
+                priv->updating_ai_ui = false;
+            }
+            g_free(stxt);
+        }
+    }
+    save_ai_settings(priv, false);
 }
 
 static void
@@ -2303,7 +2528,7 @@ ensure_soup_session(GncPluginPageRetirementPrivate* priv)
 static void
 populate_ai_model_list(GncPluginPageRetirementPrivate* priv,
                        const std::vector<std::string>& models,
-                       const char* preferred = nullptr)
+                       const char* preferred)
 {
     if (!priv->combo_ai_model)
         return;
@@ -2324,22 +2549,13 @@ static void
 on_ai_provider_changed(GtkComboBox*, gpointer user_data)
 {
     auto* priv = static_cast<GncPluginPageRetirementPrivate*>(user_data);
-    int idx = gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider));
-    if (idx == 0)
-    {
-        gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/chat");
-        populate_ai_model_list(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
-    }
-    else if (idx == 1)
-    {
-        gtk_entry_set_text(priv->entry_ai_endpoint, "https://generativelanguage.googleapis.com/v1beta");
-        populate_ai_model_list(priv, {"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"}, "gemini-2.5-flash");
-    }
-    else
-    {
-        gtk_entry_set_text(priv->entry_ai_endpoint, "https://api.openai.com/v1/chat/completions");
-        populate_ai_model_list(priv, {"gpt-4o-mini", "gpt-4o", "o3-mini"}, "gpt-4o-mini");
-    }
+    if (priv->updating_ai_ui)
+        return;
+    int idx = std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(priv->combo_ai_provider)), 0, 2);
+    priv->updating_ai_ui = true;
+    apply_provider_defaults(priv, idx);
+    priv->updating_ai_ui = false;
+    save_ai_settings(priv, false);
 }
 
 struct AiCallCtx
@@ -2386,6 +2602,7 @@ on_ai_models_finished(GObject* source, GAsyncResult* res, gpointer user_data)
     }
 
     populate_ai_model_list(priv, models);
+    save_ai_settings(priv, false);
     if (priv->lbl_ai_status)
     {
         std::string st = "Loaded " + std::to_string(models.size()) + " models.";
@@ -2689,6 +2906,7 @@ on_ai_stop_clicked(GtkButton*, gpointer user_data)
 static void
 send_ai_prompt(GncPluginPageRetirementPrivate* priv, const std::string& user_question)
 {
+    save_ai_settings(priv, true);
     ensure_soup_session(priv);
     if (priv->ai_cancel)
     {
@@ -3988,16 +4206,19 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     priv->entry_ai_endpoint = GTK_ENTRY(gtk_entry_new());
     gtk_entry_set_text(priv->entry_ai_endpoint, "http://localhost:11434/api/chat");
     gtk_widget_set_hexpand(GTK_WIDGET(priv->entry_ai_endpoint), TRUE);
+    g_signal_connect(priv->entry_ai_endpoint, "changed", G_CALLBACK(on_ai_setting_changed), priv);
 
     priv->combo_ai_model = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new_with_entry());
     priv->entry_ai_model = GTK_ENTRY(gtk_bin_get_child(GTK_BIN(priv->combo_ai_model)));
     populate_ai_model_list(priv, {"llama3.2", "qwen2.5", "mistral", "gemma2"}, "llama3.2");
+    g_signal_connect(priv->entry_ai_model, "changed", G_CALLBACK(on_ai_setting_changed), priv);
     GtkWidget* btn_ai_refresh = gtk_button_new_with_label(_("Refresh Models"));
     g_signal_connect(btn_ai_refresh, "clicked", G_CALLBACK(on_ai_refresh_models_clicked), priv);
 
     priv->entry_ai_key = GTK_ENTRY(gtk_entry_new());
     gtk_entry_set_visibility(priv->entry_ai_key, FALSE);
     gtk_entry_set_placeholder_text(priv->entry_ai_key, _("Optional for Ollama; or set GEMINI_API_KEY / OPENAI_API_KEY"));
+    g_signal_connect(priv->entry_ai_key, "changed", G_CALLBACK(on_ai_setting_changed), priv);
 
     gtk_grid_attach(GTK_GRID(ai_cfg), gtk_label_new(_("Provider")), 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(ai_cfg), GTK_WIDGET(priv->combo_ai_provider), 1, 0, 1, 1);
@@ -4029,6 +4250,8 @@ gnc_plugin_page_retirement_create_widget(GncPluginPage* plugin_page)
     gtk_text_view_set_left_margin(priv->tv_ai_system, 6);
     gtk_text_view_set_right_margin(priv->tv_ai_system, 6);
     gtk_text_buffer_set_text(gtk_text_view_get_buffer(priv->tv_ai_system), ai_preset_text(0), -1);
+    g_signal_connect(gtk_text_view_get_buffer(priv->tv_ai_system), "changed",
+                     G_CALLBACK(on_ai_system_prompt_changed), priv);
     GtkWidget* sys_scroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sys_scroll),
                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
