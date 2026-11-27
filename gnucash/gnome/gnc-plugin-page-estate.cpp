@@ -287,28 +287,36 @@ fmt_money_str(double v)
     return (neg ? "-$" : "$") + out;
 }
 
-static std::vector<std::pair<std::string, double>>
+struct GncAssetAccountInfo
+{
+    std::string full_name;
+    double balance = 0.0;
+    bool is_leaf = true;
+};
+
+static std::vector<GncAssetAccountInfo>
 collect_gnucash_asset_accounts()
 {
-    std::vector<std::pair<std::string, double>> out;
+    std::vector<GncAssetAccountInfo> out;
     QofBook* book = gnc_get_current_book();
     if (!book) return out;
     Account* root = gnc_book_get_root_account(book);
     if (!root) return out;
+    const gnc_commodity* def_curr = gnc_default_currency();
     GList* all_accts = gnc_account_get_descendants_sorted(root);
     for (GList* n = all_accts; n; n = n->next)
     {
         Account* a = GNC_ACCOUNT(n->data);
         GNCAccountType t = xaccAccountGetType(a);
-        if ((t == ACCT_TYPE_BANK || t == ACCT_TYPE_CASH || t == ACCT_TYPE_STOCK ||
-             t == ACCT_TYPE_MUTUAL || t == ACCT_TYPE_ASSET) &&
-            gnc_account_n_children(a) == 0)
+        if (t == ACCT_TYPE_BANK || t == ACCT_TYPE_CASH || t == ACCT_TYPE_STOCK ||
+            t == ACCT_TYPE_MUTUAL || t == ACCT_TYPE_ASSET)
         {
             gchar* fname = gnc_account_get_full_name(a);
-            double bal = gnc_numeric_to_double(xaccAccountGetBalance(a));
+            double bal = gnc_numeric_to_double(xaccAccountGetBalanceInCurrency(a, def_curr, TRUE));
+            bool leaf = (gnc_account_n_children(a) == 0);
             if (fname)
             {
-                out.emplace_back(fname, bal);
+                out.push_back({fname, bal, leaf});
                 g_free(fname);
             }
         }
@@ -1191,15 +1199,21 @@ refresh_ben_store(GncPluginPageEstatePrivate* priv)
     {
         auto accts = collect_gnucash_asset_accounts();
         std::vector<std::string> unlinked;
-        for (const auto& [name, bal] : accts)
+        for (const auto& ac : accts)
         {
-            if (bal <= 0.01) continue;
+            if (!ac.is_leaf || ac.balance <= 0.01) continue;
             bool found = false;
             for (const auto& b : priv->ben_rows)
             {
-                if (b.linked_gnucash_acct == name) { found = true; break; }
+                if (b.linked_gnucash_acct.empty()) continue;
+                if (b.linked_gnucash_acct == ac.full_name ||
+                    ac.full_name.rfind(b.linked_gnucash_acct + ":", 0) == 0)
+                {
+                    found = true;
+                    break;
+                }
             }
-            if (!found) unlinked.push_back(name + " (" + fmt_money_str(bal) + ")");
+            if (!found) unlinked.push_back(ac.full_name + " (" + fmt_money_str(ac.balance) + ")");
         }
         if (unlinked.empty())
             gtk_label_set_text(priv->lbl_ben_unmapped, _("All positive-balance GnuCash asset/investment accounts are linked."));
@@ -1698,8 +1712,50 @@ on_ben_selection_changed(GtkTreeSelection* sel, gpointer user_data)
             gtk_entry_set_text(priv->entry_ben_trigger, b.recheck_trigger.c_str());
             gtk_entry_set_text(priv->entry_ben_date, b.last_verified_date.c_str());
             gtk_entry_set_text(priv->entry_ben_notes, b.notes.c_str());
+            priv->updating_ui = true;
             set_selected_ben_gnc_acct(priv, b.linked_gnucash_acct);
+            priv->updating_ui = false;
             if (priv->entry_ben_doc) gtk_entry_set_text(priv->entry_ben_doc, b.doc_path.c_str());
+        }
+    }
+}
+
+static void
+on_ben_gnc_acct_changed(GtkComboBox*, gpointer user_data)
+{
+    auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
+    if (priv->updating_ui)
+        return;
+    std::string acct = get_selected_ben_gnc_acct(priv);
+    if (acct.empty())
+    {
+        if (priv->selected_ben_idx >= 0 && priv->selected_ben_idx < static_cast<gint>(priv->ben_rows.size()))
+        {
+            priv->ben_rows[priv->selected_ben_idx].linked_gnucash_acct.clear();
+            refresh_ben_store(priv);
+            save_estate_state(priv, true);
+        }
+        return;
+    }
+
+    for (const auto& ac : collect_gnucash_asset_accounts())
+    {
+        if (ac.full_name == acct)
+        {
+            std::string val_str = fmt_money_str(ac.balance);
+            if (priv->entry_ben_val)
+                gtk_entry_set_text(priv->entry_ben_val, val_str.c_str());
+            if (priv->selected_ben_idx >= 0 && priv->selected_ben_idx < static_cast<gint>(priv->ben_rows.size()))
+            {
+                auto& b = priv->ben_rows[priv->selected_ben_idx];
+                b.linked_gnucash_acct = acct;
+                b.approx_value = val_str;
+                refresh_ben_store(priv);
+                save_estate_state(priv, true);
+            }
+            if (priv->lbl_status)
+                gtk_label_set_text(priv->lbl_status, ("Linked " + acct + " (" + val_str + ")").c_str());
+            break;
         }
     }
 }
@@ -1782,17 +1838,17 @@ on_ben_sync_book_clicked(GtkButton*, gpointer user_data)
     auto accts = collect_gnucash_asset_accounts();
     double total_assets = 0.0;
     int updated = 0;
-    for (const auto& [name, bal] : accts)
-        total_assets += bal;
+    for (const auto& ac : accts)
+        if (ac.is_leaf) total_assets += ac.balance;
 
     for (auto& b : priv->ben_rows)
     {
         if (b.linked_gnucash_acct.empty()) continue;
-        for (const auto& [name, bal] : accts)
+        for (const auto& ac : accts)
         {
-            if (name == b.linked_gnucash_acct)
+            if (ac.full_name == b.linked_gnucash_acct)
             {
-                b.approx_value = fmt_money_str(bal);
+                b.approx_value = fmt_money_str(ac.balance);
                 ++updated;
                 break;
             }
@@ -2001,15 +2057,16 @@ on_ht_pull_book_clicked(GtkButton*, gpointer user_data)
     auto* priv = static_cast<GncPluginPageEstatePrivate*>(user_data);
     auto accts = collect_gnucash_asset_accounts();
     double trad = 0.0, roth = 0.0;
-    for (const auto& [name, bal] : accts)
+    for (const auto& ac : accts)
     {
-        std::string low = name;
+        if (!ac.is_leaf) continue;
+        std::string low = ac.full_name;
         for (char& ch : low) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         if (low.find("roth") != std::string::npos)
-            roth += bal;
+            roth += ac.balance;
         else if (low.find("401") != std::string::npos || low.find("403") != std::string::npos ||
                  low.find("ira") != std::string::npos || low.find("457") != std::string::npos)
-            trad += bal;
+            trad += ac.balance;
     }
     if (priv->spin_ht_trad) gtk_spin_button_set_value(priv->spin_ht_trad, trad);
     if (priv->spin_ht_roth) gtk_spin_button_set_value(priv->spin_ht_roth, roth);
@@ -3249,12 +3306,10 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
 
     priv->combo_ben_gnc_acct = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     gtk_combo_box_text_append_text(priv->combo_ben_gnc_acct, "(None / Manual)");
-    for (const auto& [name, bal] : collect_gnucash_asset_accounts())
-    {
-        (void)bal;
-        gtk_combo_box_text_append_text(priv->combo_ben_gnc_acct, name.c_str());
-    }
+    for (const auto& ac : collect_gnucash_asset_accounts())
+        gtk_combo_box_text_append_text(priv->combo_ben_gnc_acct, ac.full_name.c_str());
     gtk_combo_box_set_active(GTK_COMBO_BOX(priv->combo_ben_gnc_acct), 0);
+    g_signal_connect(priv->combo_ben_gnc_acct, "changed", G_CALLBACK(on_ben_gnc_acct_changed), priv);
 
     priv->entry_ben_doc = GTK_ENTRY(gtk_entry_new());
     gtk_entry_set_placeholder_text(priv->entry_ben_doc, _("Optional path to TOD/POD/Deed PDF"));
