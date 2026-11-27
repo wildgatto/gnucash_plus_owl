@@ -1537,18 +1537,23 @@ gnc_plugin_page_estate_class_init(GncPluginPageEstateClass* klass)
 static void
 gnc_plugin_page_estate_init(GncPluginPageEstate* page)
 {
-    gnc_plugin_page_set_use_new_window(GNC_PLUGIN_PAGE(page), FALSE);
-    g_object_set(G_OBJECT(page),
-                 "page-name", _("Estate Planning & Continuity"),
-                 "page-uri", "default:",
-                 "ui-description", "gnc-plugin-page-estate-ui.xml",
-                 nullptr);
+    auto priv = GNC_PLUGIN_PAGE_ESTATE_GET_PRIVATE(page);
+    new (&priv->items) std::vector<EstateChecklistItem>();
+    new (&priv->ben_rows) std::vector<BeneficiaryAuditRow>();
+    new (&priv->ice_rows) std::vector<IceDirectoryRow>();
+
+    gnc_plugin_page_add_book(GNC_PLUGIN_PAGE(page), gnc_get_current_book());
 }
 
 static void
 gnc_plugin_page_estate_finalize(GObject* object)
 {
     g_return_if_fail(GNC_IS_PLUGIN_PAGE_ESTATE(object));
+    auto page = GNC_PLUGIN_PAGE_ESTATE(object);
+    auto priv = GNC_PLUGIN_PAGE_ESTATE_GET_PRIVATE(page);
+    priv->items.~vector();
+    priv->ben_rows.~vector();
+    priv->ice_rows.~vector();
     G_OBJECT_CLASS(gnc_plugin_page_estate_parent_class)->finalize(object);
 }
 
@@ -1853,5 +1858,7 @@ gnc_plugin_page_estate_destroy_widget(GncPluginPage* plugin_page)
 extern "C" GncPluginPage*
 gnc_plugin_page_estate_new(void)
 {
-    return GNC_PLUGIN_PAGE(g_object_new(GNC_TYPE_PLUGIN_PAGE_ESTATE, nullptr));
+    auto page = GNC_PLUGIN_PAGE_ESTATE(g_object_new(GNC_TYPE_PLUGIN_PAGE_ESTATE, nullptr));
+    g_object_set(G_OBJECT(page), "page-name", _("Estate Planning & Continuity"), nullptr);
+    return GNC_PLUGIN_PAGE(page);
 }
