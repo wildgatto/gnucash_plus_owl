@@ -2168,6 +2168,16 @@ on_reset_defaults_clicked(GtkButton*, gpointer user_data)
 }
 
 static GtkWidget*
+wrap_in_scrolled(GtkWidget* child)
+{
+    GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(sw), child);
+    return sw;
+}
+
+static GtkWidget*
 build_checklist_section_tab(GncPluginPageEstatePrivate* priv, int sec)
 {
     auto& tab = priv->sec_tabs[sec];
@@ -2212,7 +2222,7 @@ build_checklist_section_tab(GncPluginPageEstatePrivate* priv, int sec)
 
     GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(sw), 210);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(sw), 150);
     gtk_container_add(GTK_CONTAINER(sw), GTK_WIDGET(tab.tv));
     gtk_box_pack_start(GTK_BOX(vbox), sw, TRUE, TRUE, 0);
 
@@ -2240,7 +2250,7 @@ build_checklist_section_tab(GncPluginPageEstatePrivate* priv, int sec)
     tab.tv_details = GTK_TEXT_VIEW(gtk_text_view_new());
     gtk_text_view_set_wrap_mode(tab.tv_details, GTK_WRAP_WORD_CHAR);
     GtkWidget* dsw = gtk_scrolled_window_new(nullptr, nullptr);
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(dsw), 85);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(dsw), 65);
     gtk_container_add(GTK_CONTAINER(dsw), GTK_WIDGET(tab.tv_details));
 
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new(_("Title")), 0, 0, 1, 1);
@@ -2445,11 +2455,12 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_text_view_set_wrap_mode(priv->tv_triggers, GTK_WRAP_WORD_CHAR);
     GtkWidget* trig_sw = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(trig_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(trig_sw), 100);
     gtk_container_add(GTK_CONTAINER(trig_sw), GTK_WIDGET(priv->tv_triggers));
     gtk_box_pack_start(GTK_BOX(tab_ov), trig_sw, TRUE, TRUE, 0);
 
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ov, gtk_label_new(_("Overview & Triggers")));
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), build_checklist_section_tab(priv, SEC_LEGAL), gtk_label_new(_("1. Legal Documents")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(tab_ov), gtk_label_new(_("Overview & Triggers")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(build_checklist_section_tab(priv, SEC_LEGAL)), gtk_label_new(_("1. Legal Documents")));
 
     // Tab 2: Account Titling & Beneficiary Audit
     GtkWidget* tab_ben = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -2487,7 +2498,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
 
     GtkWidget* ben_sw = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ben_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ben_sw), 220);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ben_sw), 150);
     gtk_container_add(GTK_CONTAINER(ben_sw), GTK_WIDGET(priv->ben_tv));
     gtk_box_pack_start(GTK_BOX(tab_ben), ben_sw, TRUE, TRUE, 0);
 
@@ -2563,9 +2574,9 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_container_add(GTK_CONTAINER(ben_frame), bgrid);
     gtk_box_pack_start(GTK_BOX(tab_ben), ben_frame, FALSE, FALSE, 0);
 
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ben, gtk_label_new(_("2. Beneficiary Audit")));
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), build_checklist_section_tab(priv, SEC_TAX), gtk_label_new(_("3. Tax Continuity")));
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), build_checklist_section_tab(priv, SEC_ICE), gtk_label_new(_("4. ICE Checklist")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(tab_ben), gtk_label_new(_("2. Beneficiary Audit")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(build_checklist_section_tab(priv, SEC_TAX)), gtk_label_new(_("3. Tax Continuity")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(build_checklist_section_tab(priv, SEC_ICE)), gtk_label_new(_("4. ICE Checklist")));
 
     // Tab 5: ICE & Digital Directory
     GtkWidget* tab_ice = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -2596,7 +2607,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
 
     GtkWidget* ice_sw = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ice_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ice_sw), 220);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ice_sw), 150);
     gtk_container_add(GTK_CONTAINER(ice_sw), GTK_WIDGET(priv->ice_tv));
     gtk_box_pack_start(GTK_BOX(tab_ice), ice_sw, TRUE, TRUE, 0);
 
@@ -2640,7 +2651,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_container_add(GTK_CONTAINER(ice_frame), igrid);
     gtk_box_pack_start(GTK_BOX(tab_ice), ice_frame, FALSE, FALSE, 0);
 
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ice, gtk_label_new(_("5. ICE Directory")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(tab_ice), gtk_label_new(_("5. ICE Directory")));
 
     // Tab 6: Fiduciary & Key Contacts Roster
     GtkWidget* tab_ct = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -2667,7 +2678,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
                      G_CALLBACK(on_contact_selection_changed), priv);
     GtkWidget* ct_sw = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ct_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ct_sw), 220);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ct_sw), 150);
     gtk_container_add(GTK_CONTAINER(ct_sw), GTK_WIDGET(priv->contact_tv));
     gtk_box_pack_start(GTK_BOX(tab_ct), ct_sw, TRUE, TRUE, 0);
 
@@ -2709,7 +2720,7 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_grid_attach(GTK_GRID(cgrid), ct_btns, 1, 3, 3, 1);
     gtk_container_add(GTK_CONTAINER(ct_frame), cgrid);
     gtk_box_pack_start(GTK_BOX(tab_ct), ct_frame, FALSE, FALSE, 0);
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ct, gtk_label_new(_("6. Contacts & Fiduciaries")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(tab_ct), gtk_label_new(_("6. Contacts & Fiduciaries")));
 
     // Tab 7: Heir 10-Yr Tax Estimator (SECURE Act)
     GtkWidget* tab_ht = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -2762,9 +2773,10 @@ gnc_plugin_page_estate_create_widget(GncPluginPage* plugin_page)
     gtk_text_view_set_monospace(priv->tv_ht_report, TRUE);
     GtkWidget* ht_sw = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ht_sw), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(ht_sw), 140);
     gtk_container_add(GTK_CONTAINER(ht_sw), GTK_WIDGET(priv->tv_ht_report));
     gtk_box_pack_start(GTK_BOX(tab_ht), ht_sw, TRUE, TRUE, 0);
-    gtk_notebook_append_page(GTK_NOTEBOOK(nb), tab_ht, gtk_label_new(_("7. Heir 10-Yr Tax")));
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), wrap_in_scrolled(tab_ht), gtk_label_new(_("7. Heir 10-Yr Tax")));
 
     gtk_box_pack_start(GTK_BOX(root), nb, TRUE, TRUE, 0);
     gtk_widget_show_all(root);
